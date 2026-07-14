@@ -39,7 +39,7 @@ from aisurgeon.extraction.gemini.document_map import (
     load_prompt,
     validate_document_map,
 )
-from aisurgeon.extraction.gemini.errors import GeminiInteractionFailedError
+from aisurgeon.extraction.gemini.errors import GeminiError
 from aisurgeon.extraction.gemini.models import DocumentMap, PageRange
 from aisurgeon.extraction.pdf_registration import PdfRegistration, register_pdf
 
@@ -174,37 +174,17 @@ def _request_with_checkpoint(
     status_path: Path, raw_path: Path, validated_path: Path,
     job: dict[str, Any] | None = None,
 ) -> tuple[Any, dict[str, int] | None]:
-    checkpoint = _read_checkpoint(status_path)
-    saved_id = checkpoint.get("interaction_id")
-    interaction_id = saved_id if isinstance(saved_id, str) and saved_id else None
-    tracked_id = interaction_id
-
-    def persist_started(new_id: str) -> None:
-        nonlocal tracked_id
-        tracked_id = new_id
-        _write_checkpoint(status_path, {
-            "status": "in_progress", "interaction_id": new_id, "job": job,
-            "interaction_deleted": False,
-        })
-
+    _write_checkpoint(status_path, {"status": "in_progress", "job": job})
     try:
-        validated, raw, usage, completed_id = gateway.request_structured(
-            remote=remote, prompt=prompt, model=model, interaction_id=interaction_id,
-            on_started=persist_started,
+        validated, raw, usage = gateway.request_structured(
+            remote=remote, prompt=prompt, model=model
         )
-    except GeminiInteractionFailedError as exc:
-        _write_checkpoint(status_path, {
-            "status": exc.status, "interaction_id": tracked_id,
-            "job": job, "interaction_deleted": False,
-        })
+    except GeminiError:
+        _write_checkpoint(status_path, {"status": "failed", "job": job})
         raise
     _replace_json(raw_path, json.loads(raw))
     _replace_json(validated_path, validated)
-    interaction_deleted = gateway.delete_interaction(completed_id)
-    _write_checkpoint(status_path, {
-        "status": "completed", "interaction_id": completed_id, "job": job,
-        "interaction_deleted": interaction_deleted,
-    })
+    _write_checkpoint(status_path, {"status": "completed", "job": job})
     return validated, usage
 
 

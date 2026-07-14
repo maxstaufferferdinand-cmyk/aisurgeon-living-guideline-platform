@@ -1,7 +1,6 @@
-"""One-upload Gemini session for staged canonical extraction."""
+"""GenerateContent adapter for staged canonical extraction from one uploaded PDF."""
 
 import json
-from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TypeVar
@@ -9,18 +8,15 @@ from typing import Any, TypeVar
 from pydantic import BaseModel, SecretStr, ValidationError
 
 from aisurgeon.extraction.gemini.client import GeminiDocumentMapClient
-from aisurgeon.extraction.gemini.errors import (
-    GeminiInteractionFailedError,
-    GeminiResponseValidationError,
-    GeminiTransientError,
-)
+from aisurgeon.extraction.gemini.errors import GeminiResponseValidationError
 from aisurgeon.extraction.gemini.models import GeminiModelConfig, RemoteFileMetadata
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
+GENERATE_CONTENT_TIMEOUT_SECONDS = 1200
 
 
 class CanonicalGeminiClient(GeminiDocumentMapClient):
-    """Reuse one temporary PDF for every structured extraction job."""
+    """Reuse one Files-API URI for synchronous GenerateContent extraction jobs."""
 
     def __init__(
         self,
@@ -29,15 +25,16 @@ class CanonicalGeminiClient(GeminiDocumentMapClient):
         model_config: GeminiModelConfig,
         client: Any | None = None,
         sleep: Any = None,
-        poll_interval_seconds: float = 5.0,
-        max_poll_attempts: int = 120,
     ) -> None:
-        kwargs = {"api_key": api_key, "model_config": model_config, "client": client}
+        kwargs = {
+            "api_key": api_key,
+            "model_config": model_config,
+            "client": client,
+            "request_timeout_seconds": GENERATE_CONTENT_TIMEOUT_SECONDS,
+        }
         if sleep is not None:
             kwargs["sleep"] = sleep
         super().__init__(**kwargs)
-        self._poll_interval_seconds = poll_interval_seconds
-        self._max_poll_attempts = max_poll_attempts
 
     def upload_pdf(self, pdf_path: Path) -> Any:
         remote = self._with_retry(
@@ -56,19 +53,18 @@ class CanonicalGeminiClient(GeminiDocumentMapClient):
         )
         return remote
 
-    def request_structured(
-        self,
-        *,
-        remote: Any,
-        prompt: str,
-        model: type[ModelT],
-        interaction_id: str | None = None,
-        on_started: Callable[[str], None] | None = None,
-    ) -> tuple[ModelT, str, dict[str, int] | None, str]:
-        schema = self.request_schema(model)
+    @staticmethod
+    def _canonical_request_schema(model: type[BaseModel]) -> dict[str, Any]:
+        schema = GeminiDocumentMapClient.request_schema(model)
         python_only_fields = {
-            "item_id", "comment_id", "reference_id", "object_id", "context_block_id",
-            "linked_comment_ids", "linked_item_ids", "unresolved_reference_numbers",
+            "item_id",
+            "comment_id",
+            "reference_id",
+            "object_id",
+            "context_block_id",
+            "linked_comment_ids",
+            "linked_item_ids",
+            "unresolved_reference_numbers",
         }
 
         def remove_python_fields(value: Any) -> None:
@@ -89,65 +85,65 @@ class CanonicalGeminiClient(GeminiDocumentMapClient):
                     remove_python_fields(child)
 
         remove_python_fields(schema)
-        if interaction_id is None:
-            interaction = self._with_retry(
-                lambda: self._client.interactions.create(
-                model=self._model_config.model_id,
-                input=[
-                    {
-                        "type": "document",
-                        "uri": getattr(remote, "uri", None),
-                        "mime_type": "application/pdf",
-                        "resolution": self._model_config.media_resolution,
-                    },
-                    {"type": "text", "text": prompt},
-                ],
-                generation_config={"thinking_level": self._model_config.thinking_level},
-                response_format={
-                    "type": "text",
-                    "mime_type": "application/json",
-                    "schema": schema,
-                },
-                background=True,
-                store=True,
-            )
-            )
-            interaction_id = getattr(interaction, "id", None)
-            if not isinstance(interaction_id, str) or not interaction_id:
-                raise GeminiResponseValidationError(
-                    "Gemini-Hintergrundinteraktion enthält keine ID."
-                )
-            if on_started is not None:
-                on_started(interaction_id)
+        return schema
 
-        completed = None
-        for attempt in range(1, self._max_poll_attempts + 1):
-            try:
-                current = self._with_retry(
-                    lambda: self._client.interactions.get(id=interaction_id)
+    @staticmethod
+    def normalize_generate_content_usage(usage: Any) -> dict[str, int] | None:
+        """Map SDK usage_metadata fields into secret-free stable audit names."""
+        aliases = {
+            "total_input_tokens": ("prompt_token_count", "input_token_count"),
+            "total_output_tokens": ("candidates_token_count", "output_token_count"),
+            "total_thought_tokens": ("thoughts_token_count", "thought_token_count"),
+            "total_cached_tokens": ("cached_content_token_count", "cached_token_count"),
+            "total_tokens": ("total_token_count", "total_tokens"),
+        }
+        if usage is None:
+            return None
+        source = usage if isinstance(usage, dict) else {}
+        normalized: dict[str, int] = {}
+        for output_name, candidates in aliases.items():
+            for candidate in candidates:
+                value = source.get(candidate) if isinstance(usage, dict) else getattr(
+                    usage, candidate, None
                 )
-            except GeminiTransientError:
-                if attempt == self._max_poll_attempts:
-                    raise
-                self._sleep(self._poll_interval_seconds)
-                continue
-            status = str(getattr(current, "status", "")).lower().split(".")[-1]
-            if status == "completed":
-                completed = current
-                break
-            if status in {"failed", "cancelled"}:
-                raise GeminiInteractionFailedError(status)
-            if status != "in_progress":
-                raise GeminiResponseValidationError(
-                    "Gemini-Hintergrundinteraktion hat einen unbekannten Status."
-                )
-            if attempt < self._max_poll_attempts:
-                self._sleep(self._poll_interval_seconds)
-        if completed is None:
-            raise GeminiTransientError(
-                "Gemini-Hintergrundinteraktion läuft nach Poll-Limit weiter."
+                if isinstance(value, int):
+                    normalized[output_name] = value
+                    break
+        return normalized or None
+
+    def request_structured(
+        self, *, remote: Any, prompt: str, model: type[ModelT]
+    ) -> tuple[ModelT, str, dict[str, int] | None]:
+        """Call gemini-3.5-flash directly; no agent routing or background interaction."""
+        schema = self._canonical_request_schema(model)
+        response = self._with_retry(
+            lambda: self._client.models.generate_content(
+                model=self._model_config.model_id,
+                contents=[
+                    {
+                        "file_data": {
+                            "file_uri": getattr(remote, "uri", None),
+                            "mime_type": getattr(remote, "mime_type", "application/pdf"),
+                        }
+                    },
+                    {"text": prompt},
+                ],
+                config={
+                    "thinking_config": {
+                        "thinking_level": self._model_config.thinking_level.upper(),
+                    },
+                    "media_resolution": (
+                        f"MEDIA_RESOLUTION_{self._model_config.media_resolution.upper()}"
+                    ),
+                    "response_mime_type": "application/json",
+                    "response_json_schema": schema,
+                    "http_options": {
+                        "timeout": GENERATE_CONTENT_TIMEOUT_SECONDS * 1000,
+                    },
+                },
             )
-        raw = getattr(completed, "output_text", None)
+        )
+        raw = getattr(response, "text", None)
         if not isinstance(raw, str):
             raise GeminiResponseValidationError("Gemini-Antwort enthält kein JSON.")
         try:
@@ -156,20 +152,10 @@ class CanonicalGeminiClient(GeminiDocumentMapClient):
             raise GeminiResponseValidationError(
                 "Gemini-Extraktionsantwort entspricht nicht dem vollständigen Schema."
             ) from exc
-        return (
-            validated,
-            raw,
-            self.normalize_usage(getattr(completed, "usage", None)),
-            interaction_id,
+        usage = self.normalize_generate_content_usage(
+            getattr(response, "usage_metadata", None)
         )
-
-    def delete_interaction(self, interaction_id: str) -> bool:
-        """Delete a persisted interaction after local outputs are durable."""
-        try:
-            self._client.interactions.delete(id=interaction_id)
-            return True
-        except Exception:
-            return False
+        return validated, raw, usage
 
     def delete_remote(self, remote: Any) -> bool:
         try:

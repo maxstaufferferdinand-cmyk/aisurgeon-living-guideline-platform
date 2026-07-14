@@ -35,6 +35,7 @@ class GeminiDocumentMapClient:
         model_config: GeminiModelConfig,
         client: Any | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        request_timeout_seconds: int | None = None,
     ) -> None:
         self._model_config = model_config
         self._sleep = sleep
@@ -46,7 +47,10 @@ class GeminiDocumentMapClient:
 
             client = genai.Client(
                 api_key=api_key.get_secret_value(),
-                http_options={"timeout": model_config.request_timeout_seconds * 1000},
+                http_options={
+                    "timeout": (request_timeout_seconds or model_config.request_timeout_seconds)
+                    * 1000
+                },
             )
         self._client = client
 
