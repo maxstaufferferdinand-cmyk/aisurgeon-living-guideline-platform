@@ -7,8 +7,9 @@ reviewable living-guideline workflows.
 
 This repository now contains the tested foundations for canonical, verbatim guideline extraction:
 typed source objects, deterministic page-window planning, IDs, reference/review logic, and safe
-outputs build on the Phase-3 PDF registration and Gemini boundary. A real Gemini pilot has not yet
-been run or validated. PubMed, update decisions, GPT synthesis, Source Lock, targeted repair,
+outputs build on the Phase-3 PDF registration and Gemini boundary. The completed GERD-v2 extraction
+is the immutable input for this phase. GPT search planning and mocked NCBI retrieval are implemented, but no live
+OpenAI or PubMed run has been validated. Update decisions, GPT synthesis, Source Lock, targeted repair,
 databases, web APIs, MCP, and document generation are **not implemented**.
 
 ## Binding architecture and roles
@@ -143,10 +144,37 @@ best effort by default; `--keep-remote-file` is an explicit exception for contro
 Never place PDFs, run outputs, or credentials in Git. See
 [Gemini PDF smoke-test architecture](docs/architecture/gemini_pdf_smoke_test.md).
 
+## PubMed search planning and retrieval
+
+The canonical `formal_items.jsonl` is the search basis; statements and recommendations are treated
+equally. GPT creates only semantic English SearchUnit cores. Python deterministically adds dates,
+the Humans filter, evidence-type and guideline-exclusion filters. Search generation and NCBI fetch
+are independent, fingerprinted, resumable runs:
+
+```bash
+uv run aisurgeon generate-pubmed-searches \
+  --input-run "/path/to/immutable-extraction-run" \
+  --output-root "/path/outside/repository/runs" \
+  --env-file ".env" \
+  --start-date 2023-01-01 --end-date 2026-07-14
+
+uv run aisurgeon fetch-pubmed \
+  --input-run "/path/to/generated-search-run" \
+  --output-root "/path/outside/repository/runs" \
+  --env-file ".env"
+```
+
+Both commands accept `--resume-run`; only an identical fingerprint is accepted. On generation,
+`--limit N` processes only the first N chronological FormalItems and marks coverage incomplete;
+that Search run cannot be fetched. On fetch, `--limit N` caps PMIDs per query and creates a
+`technical_limited` run whose fingerprint cannot resume as a complete run. An explicitly selected
+repository-root `.env` works as `--env-file ".env"`; it is never loaded automatically. See
+[PubMed search and fetch architecture](docs/architecture/pubmed_search_and_fetch.md).
+
 ## Planned, not implemented
 
-Live-pilot validation, Source Lock, targeted repair, PubMed retrieval,
-evidence mapping, recommendation-level synthesis, deterministic DOCX generation,
+Live-pilot validation, Source Lock, targeted repair, evidence mapping,
+recommendation-level synthesis, deterministic DOCX generation,
 PostgreSQL, Redis, FastAPI, MCP, and deployment infrastructure remain planned work after the pilot
 gates.
 
