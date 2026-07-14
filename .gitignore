@@ -1,0 +1,46 @@
+# Secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# IDE and operating system
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local data and generated artifacts
+data/
+artifacts/
+outputs/
+exports/
+logs/
+tmp/
+temp/
+
+# Source documents and generated documents
+*.pdf
+*.docx
+*.xlsx
+*.xls
+
+# Databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Docker and local overrides
+docker-compose.override.yml
