@@ -23,7 +23,8 @@ htmlcov/
 Thumbs.db
 
 # Local data and generated artifacts
-data/
+data/*
+!data/README.md
 artifacts/
 outputs/
 exports/
