@@ -8,8 +8,19 @@ from pydantic import SecretStr
 from aisurgeon.search.pubmed import ncbi
 from aisurgeon.search.pubmed.generation import generate_searches, normalize_search_plan
 from aisurgeon.search.pubmed.models import SearchPlanDraft, SearchUnitDraft
-from aisurgeon.search.pubmed.ncbi import HttpResponse, NcbiClient, fetch_pubmed, parse_pubmed_xml
-from aisurgeon.search.pubmed.query import build_query, validate_query_core
+from aisurgeon.search.pubmed.ncbi import (
+    ESearchQueryError,
+    HttpResponse,
+    NcbiClient,
+    fetch_pubmed,
+    parse_pubmed_xml,
+)
+from aisurgeon.search.pubmed.query import (
+    EVIDENCE_TYPE_FILTER,
+    build_query,
+    validate_final_pubmed_query,
+    validate_query_core,
+)
 
 
 def query_record(query_id: str, unit_id: str, formal_id: str, core: str) -> dict:
@@ -30,10 +41,10 @@ def query_record(query_id: str, unit_id: str, formal_id: str, core: str) -> dict
         "humans_filter": humans,
         "evidence_type_filter": evidence,
         "exclusion_filter": exclusion,
-        "final_pubmed_query": f"({core}) AND {date_filter} AND {humans} AND {evidence} {exclusion}",
+        "final_pubmed_query": f"({core} AND {date_filter} AND {evidence}) {humans} {exclusion}",
         "start_date": "2023-01-01",
         "end_date": "2026-07-14",
-        "query_version": "pubmed_query_builder_v2",
+        "query_version": "pubmed_query_builder_v4",
         "prompt_version": "v1",
         "prompt_hash": "h",
         "model_id": "gpt-5.5",
@@ -124,6 +135,13 @@ def test_python_adds_technical_filters() -> None:
     assert "Observational Study" not in query.evidence_type_filter
     assert "Comparative Study" not in query.evidence_type_filter
     assert "Practice Guideline" in query.exclusion_filter
+    expected = (
+        f"({unit.query_core} AND {query.date_filter} AND {EVIDENCE_TYPE_FILTER}) "
+        "NOT (animals[mh] NOT humans[mh]) "
+        'NOT ("Practice Guideline"[pt] OR "Guideline"[pt])'
+    )
+    assert query.final_pubmed_query == expected
+    assert "AND NOT (" not in query.final_pubmed_query
 
 
 @pytest.mark.parametrize("value", ["(GERD OR reflux", "()", "AND GERD", "GERD OR AND reflux"])
@@ -152,7 +170,9 @@ def test_esearch_paginates_retries_and_never_places_key_in_cache(tmp_path: Path)
         transport=transport,
         sleep=lambda _: None,
     )
-    assert client.esearch("GERD", page_size=2) == ["1", "2", "3"]
+    result = client.esearch("GERD", page_size=2)
+    assert result["pmids"] == ["1", "2", "3"]
+    assert result["count"] == 3
     assert "top-secret-key" not in "".join(path.name for path in tmp_path.iterdir())
     assert len(calls) == 3
 
@@ -176,6 +196,42 @@ def test_permanent_error_is_not_retried(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="permanent"):
         client.esearch("GERD")
     assert calls == 1
+
+
+def test_invalid_live_ncbi_animals_translation_and_not_warning_are_rejected(
+    tmp_path: Path,
+) -> None:
+    translation = 'GERD AND ("animals"[MeSH Terms] NOT "humans"[MeSH Terms])'
+    assert "animals_exclusion_used_as_positive_filter" in validate_final_pubmed_query(translation)
+
+    def transport(*args):
+        return HttpResponse(
+            200,
+            json.dumps(
+                {
+                    "esearchresult": {
+                        "count": "0",
+                        "idlist": [],
+                        "querytranslation": translation,
+                        "warninglist": {"outputmessage": ["NOT"]},
+                        "errorlist": {},
+                    }
+                }
+            ).encode(),
+        )
+
+    client = NcbiClient(
+        email=SecretStr("x@y.test"),
+        api_key=None,
+        tool="test",
+        cache_dir=tmp_path,
+        transport=transport,
+        sleep=lambda _: None,
+    )
+    with pytest.raises(ESearchQueryError, match="query syntax problem") as exc_info:
+        client.esearch("GERD")
+    assert exc_info.value.metadata["warninglist"] == ["NOT"]
+    assert exc_info.value.metadata["querytranslation"] == translation
 
 
 def test_xml_parser_combines_abstract_parts_collective_authors_and_missing_abstract() -> None:
@@ -239,6 +295,77 @@ def test_fetch_deduplicates_pmids_and_preserves_many_to_many_provenance(tmp_path
     assert articles[0]["linked_formal_item_ids"] == ["F1", "F2"]
     assert "secret-never-output" not in "".join(
         path.read_text(errors="ignore") for path in run.rglob("*") if path.is_file()
+    )
+
+
+def test_all_zero_gate_fails_multiple_queries_but_single_zero_is_valid(tmp_path: Path) -> None:
+    class ZeroClient:
+        def esearch(self, query, limit=None):
+            return {
+                "pmids": [],
+                "count": 0,
+                "querytranslation": query,
+                "warninglist": ["No items found."],
+                "errorlist": [],
+            }
+
+        def efetch(self, pmids):
+            raise AssertionError("No EFetch expected for zero hits")
+
+    def factory(**kwargs):
+        return ZeroClient()
+
+    multi = tmp_path / "multi-search"
+    multi.mkdir()
+    _queries = [query_record("Q1", "U1", "F1", "one"), query_record("Q2", "U2", "F2", "two")]
+    (multi / "pubmed_queries.jsonl").write_text(
+        "".join(json.dumps(query) + "\n" for query in _queries), encoding="utf-8"
+    )
+    (multi / "search_manifest.json").write_text(
+        json.dumps({"run_mode": "complete"}), encoding="utf-8"
+    )
+    with pytest.raises(RuntimeError, match="all_queries_returned_zero_hits"):
+        fetch_pubmed(
+            input_run=multi,
+            output_root=tmp_path,
+            worker_id="worker",
+            email=SecretStr("owner@example.test"),
+            api_key=None,
+            client_factory=factory,
+        )
+    failed_run = next(tmp_path.glob("pubmed-fetch-*"))
+    manifest = json.loads((failed_run / "pubmed_fetch_manifest.json").read_text())
+    assert manifest["status"] == "failed"
+    errors = [
+        json.loads(line)
+        for line in (failed_run / "pubmed_fetch_errors.jsonl").read_text().splitlines()
+    ]
+    assert errors[-1]["error_code"] == "all_queries_returned_zero_hits"
+    esearch = [
+        json.loads(line)
+        for line in (failed_run / "pubmed_esearch_results.jsonl").read_text().splitlines()
+    ]
+    assert esearch[0]["count"] == 0
+    assert esearch[0]["warninglist"] == ["No items found."]
+
+    single = tmp_path / "single-search"
+    single.mkdir()
+    (single / "pubmed_queries.jsonl").write_text(
+        json.dumps(query_record("Q3", "U3", "F3", "three")) + "\n", encoding="utf-8"
+    )
+    (single / "search_manifest.json").write_text(
+        json.dumps({"run_mode": "complete"}), encoding="utf-8"
+    )
+    single_run = fetch_pubmed(
+        input_run=single,
+        output_root=tmp_path,
+        worker_id="worker",
+        email=SecretStr("owner@example.test"),
+        api_key=None,
+        client_factory=factory,
+    )
+    assert (
+        json.loads((single_run / "pubmed_fetch_manifest.json").read_text())["status"] == "completed"
     )
 
 

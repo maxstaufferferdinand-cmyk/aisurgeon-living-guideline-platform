@@ -6,7 +6,7 @@ from datetime import date
 
 from aisurgeon.search.pubmed.models import PubMedQuery, SearchUnit
 
-QUERY_BUILDER_VERSION = "pubmed_query_builder_v3"
+QUERY_BUILDER_VERSION = "pubmed_query_builder_v4"
 HUMANS_FILTER = "NOT (animals[mh] NOT humans[mh])"
 EVIDENCE_TYPE_FILTER = (
     '("Randomized Controlled Trial"[pt] OR "Meta-Analysis"[pt] OR "Systematic Review"[pt])'
@@ -58,6 +58,21 @@ def validate_query_core(query: str) -> list[str]:
     return list(dict.fromkeys(errors))
 
 
+def validate_final_pubmed_query(query: str) -> list[str]:
+    """Reject unsafe Boolean composition in a complete query or NCBI translation."""
+    errors: list[str] = []
+    if re.search(r"\b(?:AND|OR)\s+NOT\s*\(", query, re.IGNORECASE):
+        errors.append("boolean_operator_before_negative_exclusion")
+    if re.search(
+        r"\bAND\s*\(\s*(?:\"animals\"\[MeSH Terms\]|animals\[mh\])\s+NOT\s+"
+        r"(?:\"humans\"\[MeSH Terms\]|humans\[mh\])\s*\)",
+        query,
+        re.IGNORECASE,
+    ):
+        errors.append("animals_exclusion_used_as_positive_filter")
+    return errors
+
+
 def build_query(
     unit: SearchUnit,
     *,
@@ -76,9 +91,11 @@ def build_query(
         f'("{start_date:%Y/%m/%d}"[Date - Publication] : "{end_date:%Y/%m/%d}"[Date - Publication])'
     )
     final = (
-        f"({core}) AND {date_filter} AND {HUMANS_FILTER} "
-        f"AND {EVIDENCE_TYPE_FILTER} {EXCLUSION_FILTER}"
+        f"({core} AND {date_filter} AND {EVIDENCE_TYPE_FILTER}) {HUMANS_FILTER} {EXCLUSION_FILTER}"
     )
+    final_errors = validate_final_pubmed_query(final)
+    if final_errors:
+        raise ValueError(f"Invalid final PubMed query: {', '.join(final_errors)}")
     query_id = f"{unit.source_id}_QUERY_{sha256_text(unit.search_unit_id + final)[:12]}"
     return PubMedQuery(
         source_id=unit.source_id,

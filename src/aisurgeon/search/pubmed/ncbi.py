@@ -23,6 +23,7 @@ from aisurgeon.search.pubmed.query import (
     EVIDENCE_TYPE_FILTER,
     EXCLUSION_FILTER,
     HUMANS_FILTER,
+    validate_final_pubmed_query,
     validate_query_core,
 )
 
@@ -45,11 +46,14 @@ def _validated_queries(path: Path) -> list[dict[str, Any]]:
         if errors:
             raise ValueError(f"Invalid stored query_core: {', '.join(errors)}")
         expected = (
-            f"({record.query_core}) AND {record.date_filter} AND {HUMANS_FILTER} "
-            f"AND {EVIDENCE_TYPE_FILTER} {EXCLUSION_FILTER}"
+            f"({record.query_core} AND {record.date_filter} AND {EVIDENCE_TYPE_FILTER}) "
+            f"{HUMANS_FILTER} {EXCLUSION_FILTER}"
         )
         if record.final_pubmed_query != expected:
             raise ValueError("Stored final_pubmed_query is not deterministic")
+        final_errors = validate_final_pubmed_query(record.final_pubmed_query)
+        if final_errors:
+            raise ValueError(f"Invalid stored final_pubmed_query: {', '.join(final_errors)}")
         validated.append(record.model_dump(mode="json"))
     return validated
 
@@ -57,6 +61,24 @@ def _validated_queries(path: Path) -> list[dict[str, Any]]:
 class HttpResponse:
     def __init__(self, status: int, body: bytes, headers: dict[str, str] | None = None) -> None:
         self.status, self.body, self.headers = status, body, headers or {}
+
+
+class ESearchQueryError(RuntimeError):
+    def __init__(self, message: str, metadata: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.metadata = metadata
+
+
+def _messages(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [str(item) for item in value]
+    if isinstance(value, dict):
+        return [message for item in value.values() for message in _messages(item)]
+    return [str(value)]
 
 
 def _transport(url: str, params: dict[str, str], timeout: float) -> HttpResponse:
@@ -149,11 +171,16 @@ class NcbiClient:
             raise RuntimeError(f"NCBI permanent HTTP status {response.status}")
         raise AssertionError("unreachable")
 
-    def esearch(self, query: str, *, page_size: int = 500, limit: int | None = None) -> list[str]:
+    def esearch(
+        self, query: str, *, page_size: int = 500, limit: int | None = None
+    ) -> dict[str, Any]:
         pmids: list[str] = []
         seen: set[str] = set()
         total: int | None = None
         retstart = 0
+        querytranslation = ""
+        warnings: list[str] = []
+        errors: list[str] = []
         while total is None or retstart < total:
             wanted = page_size if limit is None else min(page_size, limit - len(pmids))
             if wanted <= 0:
@@ -172,6 +199,9 @@ class NcbiClient:
                 result = json.loads(body)["esearchresult"]
                 total = int(result["count"])
                 page = [str(value) for value in result.get("idlist", [])]
+                querytranslation = str(result.get("querytranslation") or querytranslation)
+                warnings.extend(_messages(result.get("warninglist")))
+                errors.extend(_messages(result.get("errorlist")))
             except (KeyError, TypeError, ValueError, json.JSONDecodeError):
                 raise RuntimeError("NCBI ESearch returned an invalid JSON response") from None
             retstart += len(page)
@@ -187,7 +217,23 @@ class NcbiClient:
                         "NCBI ESearch pagination ended before the reported result count"
                     )
                 break
-        return pmids[:limit] if limit is not None else pmids
+        metadata = {
+            "pmids": pmids[:limit] if limit is not None else pmids,
+            "count": total or 0,
+            "querytranslation": querytranslation,
+            "warninglist": list(dict.fromkeys(warnings)),
+            "errorlist": list(dict.fromkeys(errors)),
+        }
+        disallowed_warnings = [
+            message for message in metadata["warninglist"] if message != "No items found."
+        ]
+        translation_errors = validate_final_pubmed_query(querytranslation)
+        if metadata["errorlist"] or disallowed_warnings or translation_errors:
+            codes = [*metadata["errorlist"], *disallowed_warnings, *translation_errors]
+            raise ESearchQueryError(
+                f"NCBI ESearch query syntax problem: {'; '.join(codes)}", metadata
+            )
+        return metadata
 
     def efetch(self, pmids: list[str]) -> bytes:
         return self._request(
@@ -378,17 +424,37 @@ def fetch_pubmed(
     checkpoints.mkdir(exist_ok=True)
     client = client_factory(email=email, api_key=api_key, tool=tool, cache_dir=cache)
     provenance: dict[str, dict[str, set[str]]] = {}
-    hits, errors = [], []
+    hits, errors, query_results = [], [], []
     for query in queries:
         checkpoint = checkpoints / f"{query['query_id']}.json"
         try:
-            pmids = (
-                json.loads(checkpoint.read_text())["pmids"]
-                if checkpoint.exists()
-                else client.esearch(query["final_pubmed_query"], limit=limit)
-            )
+            if checkpoint.exists():
+                result = json.loads(checkpoint.read_text())
+            else:
+                raw_result = client.esearch(query["final_pubmed_query"], limit=limit)
+                result = (
+                    raw_result
+                    if isinstance(raw_result, dict)
+                    else {
+                        "pmids": raw_result,
+                        "count": len(raw_result),
+                        "querytranslation": "",
+                        "warninglist": [],
+                        "errorlist": [],
+                    }
+                )
+            pmids = result["pmids"]
+            query_result = {
+                "query_id": query["query_id"],
+                "search_unit_id": query["search_unit_id"],
+                "count": result["count"],
+                "querytranslation": result["querytranslation"],
+                "warninglist": result["warninglist"],
+                "errorlist": result["errorlist"],
+            }
+            query_results.append(query_result)
             if not checkpoint.exists():
-                write_json(checkpoint, {"status": "completed", "pmids": pmids})
+                write_json(checkpoint, {"status": "completed", **result})
             for pmid in pmids:
                 hits.append(
                     {
@@ -404,7 +470,27 @@ def fetch_pubmed(
                 item["search_unit_ids"].add(query["search_unit_id"])
                 item["formal_item_ids"].update(query["linked_formal_item_ids"])
         except RuntimeError as exc:
-            errors.append({"query_id": query["query_id"], "error": str(exc)})
+            error = {"query_id": query["query_id"], "stage": "esearch", "error": str(exc)}
+            if isinstance(exc, ESearchQueryError):
+                error["error_code"] = "esearch_query_syntax_problem"
+                error.update(exc.metadata)
+                if not checkpoint.exists():
+                    write_json(checkpoint, {"status": "failed", **exc.metadata})
+            errors.append(error)
+    all_zero = (
+        limit is None
+        and len(queries) > 1
+        and len(query_results) == len(queries)
+        and all(result["count"] == 0 for result in query_results)
+    )
+    if all_zero:
+        errors.append(
+            {
+                "stage": "esearch",
+                "error_code": "all_queries_returned_zero_hits",
+                "error": "All valid PubMed queries returned zero hits",
+            }
+        )
     articles_by_id: dict[str, PubMedArticle] = {}
     all_pmids = list(provenance)
     for offset in range(0, len(all_pmids), 200):
@@ -450,10 +536,18 @@ def fetch_pubmed(
     ]
     write_jsonl(run_dir / "pubmed_pmids.jsonl", pmid_records)
     write_jsonl(run_dir / "pubmed_query_hits.jsonl", hits)
+    write_jsonl(run_dir / "pubmed_esearch_results.jsonl", query_results)
     write_jsonl(run_dir / "pubmed_articles.jsonl", articles)
     write_jsonl(run_dir / "pubmed_fetch_errors.jsonl", errors)
     write_articles_xlsx(run_dir / "pubmed_articles.xlsx", articles)
-    summary = {"unique_pmids": len(provenance), "articles": len(articles), "errors": len(errors)}
+    fatal_fetch = all_zero or any(error.get("stage") == "esearch" for error in errors)
+    summary = {
+        "unique_pmids": len(provenance),
+        "articles": len(articles),
+        "errors": len(errors),
+        "queries_executed": len(query_results),
+        "zero_hit_queries": sum(result["count"] == 0 for result in query_results),
+    }
     write_json(run_dir / "pubmed_fetch_summary.json", summary)
     output_files = {
         path.name: file_hash(path)
@@ -466,7 +560,11 @@ def fetch_pubmed(
             **fingerprint,
             "worker_id": worker_id,
             "created_at": now().isoformat(),
-            "status": "technical_limited" if limit is not None else "completed",
+            "status": (
+                "failed"
+                if fatal_fetch
+                else ("technical_limited" if limit is not None else "completed")
+            ),
             "run_mode": "technical_limited" if limit is not None else "complete",
             "limit_per_query": limit,
             "ncbi_configuration": {
@@ -480,4 +578,7 @@ def fetch_pubmed(
             "output_files": output_files,
         },
     )
+    if fatal_fetch:
+        code = "all_queries_returned_zero_hits" if all_zero else "esearch_query_failed"
+        raise RuntimeError(f"PubMed fetch failed: {code}; run directory: {run_dir}")
     return run_dir

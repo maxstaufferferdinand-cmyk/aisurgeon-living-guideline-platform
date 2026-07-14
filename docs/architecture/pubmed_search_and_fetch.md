@@ -23,6 +23,11 @@ Practice Guidelines remain excluded.
 failure. A non-literature-relevant item remains visible with an explicit exclusion reason.
 `pubmed_queries.jsonl` keeps `query_core` separate from every technical filter.
 
+Query builder v4 composes the core, date, and evidence-type constraints as one positive Boolean
+group. The Animals/Humans and guideline filters follow as standalone `NOT (...)` exclusions;
+neither is prefixed with `AND`. Full-query validation rejects `AND NOT`, `OR NOT`, and a positively
+joined `(animals NOT humans)` block.
+
 ## NCBI retrieval
 
 `aisurgeon fetch-pubmed` consumes an existing Search run, so retrieval can be resumed without
@@ -34,6 +39,12 @@ and available date variants.
 PMIDs are globally deduplicated. `pubmed_query_hits.jsonl` retains every query hit, while each
 unique article carries all contributing query IDs, SearchUnit IDs, and FormalItem IDs. Search and
 fetch use separate run directories and exact fingerprints; incompatible resume is rejected.
+`pubmed_esearch_results.jsonl` records count, query translation, warning list, and error list per
+successful query. Only an isolated `No items found.` warning is benign. Other warnings—including
+an `outputmessage` of `NOT`—and unsafe NCBI translations fail that query. In a complete run with
+more than one valid query, an all-zero result fails the Fetch run with
+`all_queries_returned_zero_hits`; consequently the orchestrator does not start mapping. A single
+zero-hit SearchUnit remains valid and documented.
 Manifests contain only credential presence, never credential values.
 
 `generate-pubmed-searches --limit N` processes the first N canonical FormalItems in chronological
