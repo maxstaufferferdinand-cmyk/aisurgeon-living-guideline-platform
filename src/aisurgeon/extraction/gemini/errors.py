@@ -27,3 +27,11 @@ class GeminiConfigurationError(GeminiError):
 
 class GeminiFileProcessingError(GeminiError):
     """The uploaded PDF did not become usable within the bounded poll window."""
+
+
+class GeminiInteractionFailedError(GeminiError):
+    """A stored background interaction failed or was cancelled."""
+
+    def __init__(self, status: str) -> None:
+        self.status = status
+        super().__init__(f"Gemini-Hintergrundinteraktion endete mit Status {status}.")

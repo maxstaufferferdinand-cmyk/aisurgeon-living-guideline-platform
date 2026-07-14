@@ -62,6 +62,15 @@ class GeminiDocumentMapClient:
 
     @classmethod
     def _classify(cls, exc: Exception) -> GeminiError:
+        if exc.__class__.__name__ == "APITimeoutError":
+            return GeminiTransientError("Temporärer Gemini-Timeout.")
+        try:
+            import httpx
+
+            if isinstance(exc, httpx.ReadTimeout):
+                return GeminiTransientError("Temporärer Gemini-Lese-Timeout.")
+        except ImportError:  # pragma: no cover - google-genai installs httpx.
+            pass
         status = cls._status_code(exc)
         if status in {401, 403}:
             return GeminiAuthenticationError("Gemini-Authentifizierung fehlgeschlagen.")

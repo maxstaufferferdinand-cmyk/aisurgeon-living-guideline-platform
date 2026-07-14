@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -38,6 +39,7 @@ from aisurgeon.extraction.gemini.document_map import (
     load_prompt,
     validate_document_map,
 )
+from aisurgeon.extraction.gemini.errors import GeminiInteractionFailedError
 from aisurgeon.extraction.gemini.models import DocumentMap, PageRange
 from aisurgeon.extraction.pdf_registration import PdfRegistration, register_pdf
 
@@ -140,6 +142,72 @@ def pending_windows(windows: list[PageWindow], checkpoint_dir: Path) -> list[Pag
     return [window for window in windows if not checkpoint_complete(checkpoint_dir, window.job_id)]
 
 
+def _read_checkpoint(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _write_checkpoint(path: Path, value: dict[str, Any]) -> None:
+    """Atomically create or replace mutable job state without exposing secrets."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def _replace_json(path: Path, value: Any) -> None:
+    if hasattr(value, "model_dump"):
+        value = value.model_dump(mode="json")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def _request_with_checkpoint(
+    *, gateway: CanonicalGeminiClient, remote: Any, prompt: str, model: Any,
+    status_path: Path, raw_path: Path, validated_path: Path,
+    job: dict[str, Any] | None = None,
+) -> tuple[Any, dict[str, int] | None]:
+    checkpoint = _read_checkpoint(status_path)
+    saved_id = checkpoint.get("interaction_id")
+    interaction_id = saved_id if isinstance(saved_id, str) and saved_id else None
+    tracked_id = interaction_id
+
+    def persist_started(new_id: str) -> None:
+        nonlocal tracked_id
+        tracked_id = new_id
+        _write_checkpoint(status_path, {
+            "status": "in_progress", "interaction_id": new_id, "job": job,
+            "interaction_deleted": False,
+        })
+
+    try:
+        validated, raw, usage, completed_id = gateway.request_structured(
+            remote=remote, prompt=prompt, model=model, interaction_id=interaction_id,
+            on_started=persist_started,
+        )
+    except GeminiInteractionFailedError as exc:
+        _write_checkpoint(status_path, {
+            "status": exc.status, "interaction_id": tracked_id,
+            "job": job, "interaction_deleted": False,
+        })
+        raise
+    _replace_json(raw_path, json.loads(raw))
+    _replace_json(validated_path, validated)
+    interaction_deleted = gateway.delete_interaction(completed_id)
+    _write_checkpoint(status_path, {
+        "status": "completed", "interaction_id": completed_id, "job": job,
+        "interaction_deleted": interaction_deleted,
+    })
+    return validated, usage
+
+
 def _prompt(root: Path, name: str) -> str:
     return (root / "config" / "prompts" / PROMPT_FILES[name]).read_text(encoding="utf-8")
 
@@ -188,14 +256,15 @@ def run_live_extraction(
         if map_path.exists():
             document_map = DocumentMap.model_validate_json(map_path.read_text(encoding="utf-8"))
         else:
-            document_map, raw, usage = gateway.request_structured(
-                remote=remote, prompt=f"source_id: {source_id}\n\n{doc_prompt}", model=DocumentMap
+            document_map, usage = _request_with_checkpoint(
+                gateway=gateway, remote=remote,
+                prompt=f"source_id: {source_id}\n\n{doc_prompt}", model=DocumentMap,
+                status_path=checkpoint_dir / "document-map.json",
+                raw_path=run_dir / "document_map.raw.json", validated_path=map_path,
             )
             report = validate_document_map(document_map, registration)
             if not report.valid:
                 raise ValueError("Dokumentkarte enthält einen Hard-Fail.")
-            write_json(map_path, document_map)
-            write_json(run_dir / "document_map.raw.json", json.loads(raw))
             token_usage.update(usage or {})
         windows = plan_extraction(
             registration, document_map, pages_per_job=pages_per_job, overlap_pages=overlap_pages
@@ -208,14 +277,14 @@ def run_live_extraction(
             if checkpoint_complete(checkpoint_dir, window.job_id) and validated_path.exists():
                 batch = model.model_validate_json(validated_path.read_text(encoding="utf-8"))
             else:
-                batch, raw, usage = gateway.request_structured(
-                    remote=remote,
+                batch, usage = _request_with_checkpoint(
+                    gateway=gateway, remote=remote,
                     prompt=_job_prompt(_prompt(root, window.stage), source_id, window),
                     model=model,
+                    status_path=status_path,
+                    raw_path=checkpoint_dir / f"{window.job_id}.raw.json",
+                    validated_path=validated_path, job=window.model_dump(),
                 )
-                write_json(checkpoint_dir / f"{window.job_id}.raw.json", json.loads(raw))
-                write_json(validated_path, batch)
-                write_json(status_path, {"status": "completed", "job": window.model_dump()})
                 for key, value in (usage or {}).items():
                     token_usage[key] = token_usage.get(key, 0) + value
             if isinstance(batch, ExtractionBatch):
@@ -224,12 +293,21 @@ def run_live_extraction(
                 context_blocks.extend(batch.clinical_context_blocks)
             else:
                 references.extend(batch.references)
-        visual_batch, raw, usage = gateway.request_structured(
-            remote=remote,
+        visual_status = checkpoint_dir / "visual-objects.json"
+        visual_validated = checkpoint_dir / "visual-objects.validated.json"
+        if checkpoint_complete(checkpoint_dir, "visual-objects") and visual_validated.exists():
+            visual_batch = VisualObjectBatch.model_validate_json(
+                visual_validated.read_text(encoding="utf-8")
+            )
+            usage = None
+        else:
+            visual_batch, usage = _request_with_checkpoint(
+            gateway=gateway, remote=remote,
             prompt=f"source_id: {source_id}\n\n{_prompt(root, 'visuals')}",
             model=VisualObjectBatch,
-        )
-        write_json(run_dir / "visual_objects.raw.json", json.loads(raw))
+            status_path=visual_status, raw_path=run_dir / "visual_objects.raw.json",
+            validated_path=visual_validated,
+            )
         visuals.extend(visual_batch.visual_objects)
         for value in references:
             value.reference_id = assign_object_id(

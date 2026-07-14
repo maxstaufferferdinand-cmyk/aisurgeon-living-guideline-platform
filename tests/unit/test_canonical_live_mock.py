@@ -17,6 +17,7 @@ from aisurgeon.extraction.gemini.models import DocumentMap, RemoteFileMetadata
 class FakeGateway:
     uploads = 0
     deletes = 0
+    interaction_deletes = 0
 
     def __init__(self, **kwargs) -> None:
         self.last_remote_metadata = RemoteFileMetadata(
@@ -27,7 +28,11 @@ class FakeGateway:
         type(self).uploads += 1
         return SimpleNamespace(name="files/fake", uri="mock://fake")
 
-    def request_structured(self, *, model, prompt: str, **kwargs):
+    def request_structured(self, *, model, prompt: str, on_started=None,
+                           interaction_id=None, **kwargs):
+        selected_id = interaction_id or f"interaction-{model.__name__}"
+        if interaction_id is None and on_started is not None:
+            on_started(selected_id)
         if model is DocumentMap:
             value = DocumentMap(
                 schema_version="document_map_v1",
@@ -57,7 +62,11 @@ class FakeGateway:
             value = VisualObjectBatch()
         else:
             raise AssertionError(model)
-        return value, value.model_dump_json(), {"total_tokens": 1}
+        return value, value.model_dump_json(), {"total_tokens": 1}, selected_id
+
+    def delete_interaction(self, interaction_id: str) -> bool:
+        type(self).interaction_deletes += 1
+        return True
 
     def delete_remote(self, remote) -> bool:
         type(self).deletes += 1
@@ -67,7 +76,7 @@ class FakeGateway:
 def test_live_pipeline_reuses_one_upload_and_writes_outputs(
     tmp_path: Path, synthetic_pdf: Path, monkeypatch
 ) -> None:
-    FakeGateway.uploads = FakeGateway.deletes = 0
+    FakeGateway.uploads = FakeGateway.deletes = FakeGateway.interaction_deletes = 0
     monkeypatch.setattr(pipeline, "git_metadata", lambda root: ("a" * 40, "test", False))
     status, run_dir = pipeline.run_live_extraction(
         pdf_path=synthetic_pdf,
@@ -80,6 +89,12 @@ def test_live_pipeline_reuses_one_upload_and_writes_outputs(
     )
     assert status == "completed"
     assert FakeGateway.uploads == FakeGateway.deletes == 1
+    assert FakeGateway.interaction_deletes == 3
+    checkpoint = json.loads(
+        (run_dir / "checkpoints" / "clinical-0001-0002.json").read_text(encoding="utf-8")
+    )
+    assert checkpoint["interaction_id"] == "interaction-ExtractionBatch"
+    assert checkpoint["interaction_deleted"] is True
     formal = json.loads((run_dir / "formal_items.jsonl").read_text(encoding="utf-8"))
     assert formal["exact_original_text"] == "Exakter synthetischer Originaltext."
     assert (run_dir / "review_findings.xlsx").is_file()
