@@ -1,0 +1,2022 @@
+AISURGEON LIVING GUIDELINE PLATFORM
+CODEX MASTER PROJECT BRIEF
+Stand: 14.07.2026
+Version: 2.0
+Status: VERBINDLICHE PROJEKTSPEZIFIKATION
+
+======================================================================
+0. GELTUNG, PRIORITÄT UND VERWENDUNG
+======================================================================
+
+Dieses Dokument ist die verbindliche fachliche, methodische und technische
+Projektbeschreibung für Codex und alle Entwickler der
+„AISurgeon Living Guideline Platform“.
+
+Codex kennt frühere ChatGPT-Gespräche nicht automatisch. Vor jeder
+substanziellen Änderung sind in dieser Reihenfolge zu lesen:
+
+1. AGENTS.md
+2. dieses Master Project Brief
+3. die für den Auftrag relevanten Dateien unter docs/
+4. bestehender Code und vorhandene Tests
+
+Bei Widersprüchen gilt folgende Priorität:
+
+1. neuere, ausdrücklich vom klinischen Owner freigegebene Entscheidung,
+2. dieses Dokument,
+3. versionierte Schemas und Tests,
+4. ältere Handoff- und PoC-Dokumente.
+
+Ältere Skripte und Dokumente sind wichtige Fehler- und Erfahrungsquellen,
+aber nicht automatisch die aktuelle Soll-Architektur. Insbesondere sind
+frühere „Fitz zuerst“- oder direkte GPT-PDF-Strategien historische
+Zwischenschritte. Die aktuelle verbindliche Architektur verwendet Gemini
+als alleinigen kanonischen nativen PDF-Extractor.
+
+Codex darf ohne ausdrückliche Anweisung:
+
+- keine .env oder Authentifizierungsdateien lesen,
+- keine API-Schlüssel anzeigen,
+- keine Commits erstellen,
+- keinen git push durchführen,
+- keine klinischen Empfehlungen eigenmächtig ergänzen,
+- keine verbindliche Methodik stillschweigend ändern.
+
+======================================================================
+1. PROJEKTZIEL UND ENTWICKLUNGSSTRATEGIE
+======================================================================
+
+Aufgebaut wird ein quellengebundenes, reproduzierbares, auditierbares und
+klinisch reviewbares Framework für automatisch unterstützte Living
+Guidelines.
+
+Verbindliche Entwicklungsreihenfolge:
+
+1. Das Framework wird auf einem zentralen Entwicklungslaptop aufgebaut.
+2. Zuerst wird ein technischer Smoke-Test mit einer Leitlinie durchgeführt.
+3. Danach wird genau eine Leitlinie vollständig end-to-end bearbeitet.
+4. Extraktion, Validierung, PubMed-Suche, Evidenzmapping, Synthese,
+   Review und finaler DOCX-Output werden vollständig geprüft.
+5. Erst wenn der Pilot fachlich und technisch überzeugt, wird auf weitere
+   Leitlinien und später auf 50–100 PDFs skaliert.
+6. PostgreSQL, Redis, zentrale Job Queue, FastAPI und MCP werden erst
+   eingeführt, wenn die Pilotstrukturen stabil sind.
+
+Technischer Smoke-Test:
+
+088-001l_S3_Chirurgie-Adipositas-metabolische-Erkrankugen_2018-02-
+abgelaufen.pdf
+
+Bekannte technische Eigenschaften:
+
+- 151 Seiten
+- nicht verschlüsselt
+- SHA-256:
+  3df74746715db4db69d36ee614c3f11f1a87b459c8da968ca6284b001817d538
+
+Zweck:
+
+- PDF-Registrierung,
+- nativer Gemini-Upload,
+- PDF-adaptive Dokumentkarte,
+- Extraktion formaler Objekte,
+- Seitenanker,
+- Tabellen und Algorithmen,
+- Referenzen,
+- Schema-QC,
+- targeted repair.
+
+Die abgelaufene Leitlinie dient als technischer Test. Der Status
+„abgelaufen“ wird als Metadatum geführt und ist kein technischer
+Ausschlussgrund.
+
+Geplanter vollständiger medizinischer End-to-End-Pilot:
+
+- Leitlinie zum perioperativen Management bei gastrointestinalen Tumoren.
+
+======================================================================
+2. VERBINDLICHE MODELLROLLEN
+======================================================================
+
+2.1 Gemini 3.5 Flash
+--------------------
+
+Gemini 3.5 Flash ist der alleinige kanonische native PDF-Extractor.
+
+Aufgaben:
+
+- Original-PDF nativ lesen,
+- vor der Detailausgabe eine PDF-adaptive Dokumentkarte erzeugen,
+- tatsächliche Struktur des individuellen PDFs erkennen,
+- formale Empfehlungen und Statements chronologisch extrahieren,
+- Kommentare und Begründungen zuordnen,
+- native Evidenzgrade, Empfehlungsgrade, Konsensangaben und Statusfelder
+  extrahieren,
+- Kapitel, Unterkapitel und Abschnittsgrenzen erfassen,
+- Inline-Referenzen und vollständiges Literaturverzeichnis extrahieren,
+- Tabellen, Algorithmen, Decision Trees und klinisch relevante
+  Abbildungen erkennen,
+- Originalseiten, Bounding Boxes und Kontextanker speichern,
+- Originaltexte wortgetreu liefern.
+
+Nicht erlaubt:
+
+- keine vollständige zweite unabhängige PDF-Extraktion durch GPT,
+- keine routinemäßige Doppelextraktion,
+- keine Erfindung fehlender Felder,
+- keine Erfindung von Empfehlungsgrad oder Konsensstärke,
+- keine Erzeugung finaler stabiler IDs,
+- keine spätere PubMed-Suche,
+- keine Änderung klinischer Empfehlungen,
+- keine freie finale DOCX-Erstellung.
+
+Qualitätssicherung:
+
+- deterministische Prüfungen nach jedem Extraktionsschritt,
+- targeted repair nur für konkrete Seiten, Blöcke oder Objekte,
+- kein kompletter Reparaturlauf ohne dokumentierten Grund.
+
+2.2 GPT / OpenAI API
+--------------------
+
+GPT übernimmt erst nach einem validierten und gesperrten Source Layer:
+
+- Zerlegung komplexer Empfehlungen in Such- und Mapping-Subitems,
+- englische PubMed-Suchstrategien,
+- Screening und Relevanzprüfung,
+- Mapping neuer Evidenz auf Empfehlungen,
+- Evidenzsynthese,
+- Vergleich von alter und neuer Evidenz,
+- konservative Updateentscheidungen,
+- gegebenenfalls Entwurf eines geänderten Empfehlungstextes,
+- Unsicherheits- und Review-Metadaten.
+
+Eine Empfehlung oder ein Statement ist die zentrale fachliche Einheit.
+
+Verbindlich:
+
+- eine Empfehlung beziehungsweise ein Statement pro substanzieller
+  Syntheseaufgabe,
+- nur relevanter Originalkontext,
+- keine Vermischung mehrerer Empfehlungen,
+- strukturierte Ausgabe nach festem Schema.
+
+2.3 Codex
+---------
+
+Codex ist Softwareentwickler und technischer Reviewer.
+
+Codex darf:
+
+- Architektur implementieren,
+- Code und Tests schreiben,
+- Fehler analysieren,
+- deterministische Reparaturen entwickeln,
+- Refactoring durchführen,
+- Dokumentation aktualisieren,
+- reproduzierbare CLI- und Pipelinefunktionen erstellen.
+
+Codex ist kein autonomer klinischer Autor.
+
+2.4 Deterministischer Python-Code
+---------------------------------
+
+Python ist das verbindende Rückgrat und übernimmt:
+
+- SHA-256,
+- stabile IDs,
+- Dateiregistrierung,
+- Sequenzierung,
+- Schema-Validierung,
+- Pflichtfeldprüfungen,
+- Duplikaterkennung,
+- Unicode-QC,
+- Referenzauflösung,
+- Deduplizierung,
+- Versionierung,
+- Run-Manifeste,
+- Retry und Resume,
+- PubMed-Abruf,
+- Zusammenführung,
+- DOCX-Erzeugung,
+- Audit-Logs und Exporte.
+
+2.5 Menschliche Rolle
+---------------------
+
+Der Nutzer ist:
+
+- klinischer Owner,
+- methodischer Owner,
+- finale Review- und Freigabeinstanz.
+
+Kein klinisch relevanter Änderungsvorschlag gilt ohne menschliche
+Freigabe als publizierte oder offizielle Empfehlung.
+
+======================================================================
+3. ZENTRALES BACKBONE UND QUELLENTREUE
+======================================================================
+
+Das zentrale Backbone sind immer die chronologisch im klinischen Hauptteil
+des Originaldokuments auftretenden formalen Empfehlungen und Statements.
+
+Nicht als Ersatz zulässig:
+
+- Inhaltsverzeichnis,
+- Executive Summary,
+- Kurzfassung,
+- „Was ist neu?“-Kapitel,
+- Änderungstabellen,
+- Zusammenfassungsboxen,
+- ein aus dem Haupttext herausgelöster verkürzter Wortlaut.
+
+Pro formalem Item werden mindestens gespeichert:
+
+- source_id,
+- recommendation_id,
+- original_item_number,
+- original_item_type,
+- original_topic_label,
+- exact_original_text,
+- page_start,
+- page_end,
+- chapter_path,
+- source_bbox beziehungsweise source_anchor,
+- native_recommendation_grade_raw,
+- native_evidence_level_raw,
+- native_consensus_raw,
+- native_status_raw,
+- original_inline_reference_numbers,
+- linked_comment_ids,
+- linked_table_ids,
+- linked_algorithm_ids.
+
+Empfehlungen, Statements und Kommentare werden wortgetreu gespeichert.
+Orthografische oder stilistische Korrekturen dürfen den Immutable Source
+Layer nicht verändern.
+
+======================================================================
+4. DATENEBENEN
+======================================================================
+
+4.1 Immutable Source Layer
+--------------------------
+
+- Original-PDF,
+- PDF-SHA-256,
+- Originaldateiname,
+- Originalseiten,
+- wortgetreue Empfehlungen,
+- wortgetreue Statements,
+- wortgetreue Kommentare,
+- native Grading- und Konsenswerte,
+- originale Referenznummern,
+- originale Tabellen-/Algorithmusanker,
+- Original-Crops,
+- Rohantwort des PDF-Extractors.
+
+4.2 Normalized Extraction Layer
+-------------------------------
+
+- strukturierte Objekte,
+- stabile IDs,
+- normalisierte Datentypen,
+- Kapitelpfade,
+- Seitenbereiche,
+- Referenzverknüpfungen,
+- technische Qualitätsmarker.
+
+4.3 Derived Interpretation Layer
+--------------------------------
+
+- semantische Interpretation,
+- PICO oder alternative Suchstruktur,
+- Subitems,
+- Themenklassifikation,
+- normalisierte Grading-Interpretation,
+- Zuordnung visueller Objekte.
+
+Diese Ebene überschreibt niemals Originaltext.
+
+4.4 Update Layer
+----------------
+
+- Suchstrategien,
+- Suchdatum,
+- PubMed-Treffer,
+- Screeningentscheidungen,
+- Mapping,
+- Evidenzsynthese,
+- Updateentscheidung,
+- vorgeschlagener Kommentar,
+- gegebenenfalls vorgeschlagener Empfehlungstext,
+- Unsicherheit,
+- Full-Text-Review-Bedarf,
+- Human-Review-Status.
+
+4.5 Publication Layer
+---------------------
+
+- menschlich freigegebene Inhalte,
+- konsolidierte Referenzen,
+- Änderungskennzeichnung,
+- DOCX,
+- Review-Excel,
+- Referenz-Mapping,
+- Audit-Export,
+- optional gerenderte PDF.
+
+======================================================================
+5. DOKUMENTKARTE, SOURCE LOCK UND REPAIR
+======================================================================
+
+5.1 PDF-adaptive Dokumentkarte
+------------------------------
+
+Vor der Detailausgabe wird pro PDF eine Dokumentkarte erstellt.
+
+Sie muss mindestens erfassen:
+
+- Front Matter,
+- Inhaltsverzeichnis,
+- klinischer Hauptteil,
+- Beginn und Ende formaler Empfehlungsebenen,
+- erkennbare formale Typen,
+- Kommentarstruktur,
+- native Grading-Systeme,
+- Literaturverzeichnis,
+- Tabellen,
+- Algorithmen,
+- Decision Trees,
+- Spalten- und Seitenlayout,
+- wiederkehrende Header/Footer,
+- Anhänge.
+
+Die Dokumentkarte ist flexibel, aber das chronologische
+Empfehlungs-/Statement-Backbone bleibt verbindlich.
+
+5.2 Source Lock
+---------------
+
+Nach erfolgreicher Extraktion und Reparatur wird ein Source Lock erzeugt.
+
+Ein Lock enthält mindestens:
+
+- lock_id,
+- source_pdf_sha256,
+- git_commit,
+- schema_version,
+- prompt_version,
+- model_id,
+- recommendation_count,
+- statement_count,
+- comment_count,
+- reference_count,
+- table_count,
+- algorithm_count,
+- unresolved_object_count,
+- Unicode-QC,
+- Status.
+
+Ab Source Lock dürfen Originalempfehlungen, Kommentare, Referenzen und
+Seitenanker nicht stillschweigend verändert werden.
+
+5.3 Targeted Repair
+-------------------
+
+Repair wird nur ausgelöst, wenn eine konkrete QC-Regel fehlschlägt.
+
+Beispiele:
+
+- fehlende Empfehlung,
+- doppelte Empfehlungsnummer,
+- leerer Empfehlungstext,
+- Kommentar ohne zugeordnetes Item,
+- unaufgelöste Inline-Referenz,
+- fehlende Seite,
+- unvollständige Tabelle,
+- widersprüchliche Referenz,
+- ungültiges Unicode-Zeichen.
+
+Ein Repair-Lauf dokumentiert:
+
+- betroffene IDs,
+- betroffene Seiten,
+- Fehlergrund,
+- Ausgangswert,
+- Reparaturwert,
+- Modell und Prompt,
+- Ergebnis der erneuten Validierung.
+
+======================================================================
+6. PUBMED- UND UPDATE-WORKFLOW
+======================================================================
+
+Für jede Empfehlung und jedes notwendige Subitem:
+
+1. Suchfrage ableiten.
+2. Suchstrategie auf Englisch erzeugen.
+3. Suchzeitraum ab Leitlinienjahr bis definiertem Enddatum setzen.
+4. Humans-Filter verwenden:
+   NOT (animals[mh] NOT humans[mh])
+5. Query, Query-Hash und PubMed Query Translation speichern.
+6. Treffer abrufen.
+7. PMID global deduplizieren.
+8. Studientyp vorläufig klassifizieren.
+9. Artikel auf Empfehlungsebene mappen.
+10. Irrelevante und indirekte Treffer im Empfehlungsschritt verwerfen.
+11. Evidenz synthetisieren.
+12. Updateentscheidung erzeugen.
+13. Klinisch relevante Änderungen menschlich prüfen.
+
+Studientypen werden an die Fragestellung angepasst. Nicht jede Empfehlung
+darf auf RCTs beschränkt werden.
+
+Mögliche Studientypen:
+
+- RCT,
+- Meta-Analyse,
+- systematischer Review,
+- prospektive Kohorte,
+- Register,
+- diagnostische Genauigkeitsstudie,
+- Prognosestudie,
+- Sicherheitsstudie,
+- geeignete indirekte Evidenz bei seltenen Erkrankungen.
+
+Für abstract-basierte Pilotläufe wird kein formales GRADE behauptet.
+
+Interne AISurgeon-Evidenzklassen:
+
+- Klasse A:
+  Meta-Analyse randomisierter Studien mit klar berichtetem klinischem
+  Effekt.
+- Klasse B:
+  systematische Reviews und Meta-Analysen nicht randomisierter oder
+  methodisch unklarer Evidenz.
+- Klasse C:
+  Einzelstudien, Expertenwissen oder indirekte Evidenz.
+
+Diese Klassen ersetzen niemals das native Evidenzsystem der Leitlinie.
+
+Mögliche Updateentscheidungen:
+
+- insufficient_evidence,
+- unchanged,
+- rationale_updated,
+- recommendation_modified,
+- statement_modified,
+- withdrawn.
+
+„modified“ ist nur zulässig, wenn sich der klinische Aussage- oder
+Handlungswortlaut tatsächlich ändert.
+
+======================================================================
+7. VERBINDLICHES FEHLERREGISTER AUS FRÜHEREN VERSUCHEN
+======================================================================
+
+Jeder folgende Punkt beschreibt:
+
+- beobachteten Fehler,
+- Ursache,
+- bereits erforderliche Korrektur,
+- verbindliche Präventionsregel.
+
+----------------------------------------------------------------------
+7.1 Nicht spaltenbewusste PDF-Textextraktion
+----------------------------------------------------------------------
+
+Beobachtung:
+
+Bei der GERD/EoE-Leitlinie wurden linke und rechte Spalten vermischt.
+Kommentare verschiedener Kapitel wurden in falscher Reihenfolge
+zusammengeführt. Empfehlung 2.17 und Empfehlung 3.1 konnten dadurch
+inhaltlich kontaminiert werden.
+
+Ursache:
+
+Plain-Text-Extraktion ohne Layoutverständnis.
+
+Frühere Korrektur:
+
+Koordinatenbasierte Sortierung:
+1. Full-width,
+2. linke Spalte nach y/x,
+3. rechte Spalte nach y/x.
+
+Aktuelle Präventionsregel:
+
+- Gemini liest das PDF nativ und PDF-adaptiv.
+- PyMuPDF darf als Audit-, Render-, Crop- oder Reparaturwerkzeug dienen,
+  aber nicht als alleinige kanonische semantische Quelle.
+- Bei zweispaltigen PDFs muss die Dokumentkarte das Spaltenlayout
+  ausdrücklich bestätigen.
+- Golden-Test mit mindestens einer zweispaltigen Leitlinie.
+
+----------------------------------------------------------------------
+7.2 Empfehlungen aus Inhaltsverzeichnis oder „Was ist neu?“
+----------------------------------------------------------------------
+
+Beobachtung:
+
+Beim Pankreas-PoC wurden formale Items teilweise aus Übersichtskapiteln
+statt aus dem klinischen Haupttext extrahiert. Ein Item zur primären
+Antikoagulation verwies zunächst auf eine Übersichtseite statt auf
+Kapitel 9.5. Dadurch fehlten Kontext, Einschränkungen und alte
+Referenzen.
+
+Ursache:
+
+Zu großes Vertrauen in seite_start und in ähnliche Kurzformulierungen.
+
+Frühere Korrektur:
+
+- Suche nach der formalen Itemnummer am Zeilenanfang,
+- Extraktion vom echten formalen Block bis zum nächsten formalen Item,
+- 173/174 Haupttextkontexte gefunden,
+- old_originaltext anschließend erneut aus dem Haupttextblock ersetzt.
+
+Aktuelle Präventionsregel:
+
+- Inhaltsverzeichnis, Summary und Haupttext als verschiedene
+  document_region_types speichern.
+- Ein formales Backbone-Item muss aus dem klinischen Hauptteil stammen.
+- Summary-Fassung darf nur als related_summary_link gespeichert werden.
+- exact_original_text muss mit dem Source-Anker des Haupttextblocks
+  verbunden sein.
+- QC: Kein Backbone-Item darf ausschließlich aus TOC oder Summary stammen.
+
+----------------------------------------------------------------------
+7.3 Paraphrasierte, fehlende oder falsche formale Items
+----------------------------------------------------------------------
+
+Beobachtung:
+
+Frühere LLM-JSONL-Dateien enthielten:
+
+- Nicht-Empfehlungen als Empfehlungen,
+- fehlende formale Blöcke,
+- veränderten Wortlaut,
+- falsche Anzahl,
+- Kommentartext als formales Item.
+
+Aktuelle Präventionsregel:
+
+- exact_original_text muss wortgetreu sein.
+- Formale Typen müssen aus der individuellen Dokumentkarte stammen.
+- Jede erkannte Empfehlung benötigt Seitenanker.
+- Chronologie, Nummernfolge, Duplikate und Lücken werden deterministisch
+  geprüft.
+- Keine stille Rechtschreibkorrektur im Source Layer.
+- Bei fehlender Sicherheit review_required oder targeted repair.
+
+----------------------------------------------------------------------
+7.4 Falsche Kommentarzuordnung
+----------------------------------------------------------------------
+
+Beobachtung:
+
+Kommentare wurden abgeschnitten, in den falschen Block gezogen oder als
+formale Empfehlung interpretiert.
+
+Aktuelle Präventionsregel:
+
+- recommendation_comment_link als eigene Entität.
+- Kommentargrenzen mit Start-/Endanker.
+- Kommentare dürfen mehrere Seiten umfassen.
+- Ein Kommentar darf nicht automatisch bis zum nächsten beliebigen
+  blauen Kasten reichen; Kapitel-, Seiten- und Objektgrenzen sind
+  gemeinsam zu prüfen.
+- Kommentare ohne eindeutige Zuordnung bleiben review_required.
+
+----------------------------------------------------------------------
+7.5 Über- und Unterextraktion im HPT-Pilot
+----------------------------------------------------------------------
+
+Beobachtung:
+
+Mehrere Extraktionsläufe führten zunächst zu 0, dann zu Teilmengen und
+schließlich zu stark überextrahierten Kommentaren und Referenzen.
+Unzugeordnete klinische Blöcke mussten separat klassifiziert und
+technisch repariert werden.
+
+Wichtige Korrekturen:
+
+- Empfehlungssollzahl 62,
+- Referenzsollzahl 470,
+- unzugeordnete Blöcke separat klassifizieren,
+- recommendation_comments neu aufbauen,
+- technische Reparaturen protokollieren,
+- Source Lock erst nach bestandenem QC.
+
+Aktuelle Präventionsregel:
+
+- keine Akzeptanz nur aufgrund „plausibel großer“ Objektzahl,
+- erwartete Nummernfolge aus Dokumentkarte ableiten,
+- recommendation_count, reference_count und unresolved_count prüfen,
+- unassigned content ist eigener Output,
+- Source Lock nur nach Gate 1.
+
+----------------------------------------------------------------------
+7.6 Technische Textfehler und ungültige Zeichen
+----------------------------------------------------------------------
+
+Beobachtung:
+
+- U+FFFE,
+- U+000C/Form Feed,
+- Literal „ufffe“,
+- „Sestamibi\fSzintigraphie“,
+- falsche Abschnittsnummer 3.1.2.6 statt 3.2.6.
+
+Frühere Korrektur:
+
+Technische Zeichen entfernt, Strukturfehler gezielt korrigiert,
+Original-Tippfehler im Source Layer jedoch erhalten.
+
+Aktuelle Präventionsregel:
+
+- Unicode-QC nach jeder textproduzierenden Stufe,
+- technische Reparatur und redaktionelle Korrektur getrennt protokollieren,
+- Source Layer behält originale inhaltliche Tippfehler,
+- normalisierte Darstellung kann separate correction_note führen.
+
+----------------------------------------------------------------------
+7.7 Instabile IDs
+----------------------------------------------------------------------
+
+Beobachtung:
+
+Sequentielle IDs verschoben sich nach erneuter Extraktion und gefährdeten
+bereits vorhandenes Mapping.
+
+Frühere Korrektur:
+
+Stabile IDs aus formaler Nummer und Typ, zum Beispiel:
+GERD_EOE_REC_2_9.
+
+Aktuelle Präventionsregel:
+
+- IDs ausschließlich deterministisch in Python.
+- Gemini und GPT dürfen nur ID-Kandidaten/Strukturhinweise liefern.
+- ID-Konvention wird versioniert.
+- Änderung der Konvention erfordert Migration.
+- Keine Zeilennummer als alleinige Identität.
+
+----------------------------------------------------------------------
+7.8 Registry- und Taxonomie-Mismatch
+----------------------------------------------------------------------
+
+Beobachtung:
+
+Bei GERD standen sieben disease_numbers nur sechs disease_names
+gegenüber. Positionsbasiertes Mapping führte zu falschen Zuordnungen.
+Lokale Registry-Pfade und download_status waren teilweise ebenfalls
+inkonsistent.
+
+Aktuelle Präventionsregel:
+
+- Niemals disease_numbers und disease_names blind positionsbasiert
+  paaren, wenn die Längen abweichen.
+- Taxonomie-ID ist primärer Schlüssel.
+- Raw Registry Values und normalisierte Zuordnung getrennt speichern.
+- Mismatch erzeugt Warnung oder Review, keinen stillen Fix.
+- Ein Dokument, Kapitel oder Chunk kann mehreren Krankheiten zugeordnet
+  sein.
+- PDF-Registrierung erfolgt nach SHA-256, nicht nur Dateiname.
+- Fallback-Dateisuche muss im Manifest dokumentiert werden.
+
+----------------------------------------------------------------------
+7.9 Harte Pfade und unterschiedliche Skripte pro Laptop
+----------------------------------------------------------------------
+
+Beobachtung:
+
+Frühere PoCs hatten Pfade, Modellnamen und Projektordner in mehreren
+Skripten hart codiert.
+
+Aktuelle Präventionsregel:
+
+- Code auf beiden Laptops identisch.
+- Lokale Unterschiede nur über .env beziehungsweise setup-local.
+- setup-local erstellt runs, cache, exports und logs automatisch.
+- README dokumentiert die lokale Einrichtung.
+- Keine absoluten persönlichen Pfade in versioniertem Code.
+- Keine manuell parallel gepflegten Frameworks.
+
+----------------------------------------------------------------------
+7.10 Fehlende oder falsche Python-Abhängigkeiten
+----------------------------------------------------------------------
+
+Beobachtung:
+
+„ModuleNotFoundError: No module named 'docx'“ entstand, weil python-docx
+nicht in der aktiven virtuellen Umgebung installiert war. Frühere
+requirements-Dateien enthielten nur ungenaue Mindestversionen.
+
+Aktuelle Präventionsregel:
+
+- Python 3.12,
+- uv,
+- pyproject.toml,
+- uv.lock,
+- uv sync --frozen auf dem übernehmenden Laptop,
+- keine manuelle globale pip-Installation,
+- config-check zeigt aktiven Interpreter,
+- CI-Test importiert alle produktiven Module.
+
+----------------------------------------------------------------------
+7.11 PubMed-Abruf mit mehr als 10.000 Treffern
+----------------------------------------------------------------------
+
+Beobachtung:
+
+Eine breite Pankreas-Query mit rund 20.755 Treffern brach beim direkten
+Abruf nach ungefähr 10.000 Treffern ab.
+
+Frühere Korrektur:
+
+Datumsfenster, Checkpoints und Resume.
+
+Aktuelle Präventionsregel:
+
+- bevorzugt Suchstrategien pro Empfehlung/Subitem,
+- große Suchmengen automatisch in reproduzierbare Fenster teilen,
+- ESearch und EFetch getrennt,
+- Pagination, Retry, Backoff und Resume,
+- PMID-Deduplizierung,
+- Query-Hash und Trefferzahl speichern,
+- keine unprotokollierte manuelle Query-Verengung.
+
+----------------------------------------------------------------------
+7.12 Fehlerhafte automatische Studientyp-Klassifikation
+----------------------------------------------------------------------
+
+Beobachtung:
+
+Ein Review konnte als RCT klassifiziert werden, wenn im Abstract
+randomisierte Studien erwähnt wurden. Im Referenzteil des Pankreas-Drafts
+wurden einzelne Reviews oder Scoping Reviews mit falschem Studientyp
+angezeigt.
+
+Aktuelle Präventionsregel:
+
+- PubMed Publication Types zuerst speichern.
+- Modellklassifikation nur als zusätzliche Interpretation.
+- Studientyp ist reviewbares Metadatum.
+- Unvalidierter Studientyp gehört nicht in die öffentliche Referenzliste.
+- Finales Literaturverzeichnis verwendet einen bibliografischen Stil,
+  nicht interne Screeninglabels.
+
+----------------------------------------------------------------------
+7.13 Zu breites Studienmapping
+----------------------------------------------------------------------
+
+Beobachtung:
+
+Breites Mapping erzeugte viele formal mögliche, aber medizinisch
+irrelevante Zuordnungen.
+
+Aktuelle Präventionsregel:
+
+- sensitiver Recall-Schritt ist erlaubt,
+- danach strenger Empfehlungsebene-Filter,
+- Include/Exclude-Entscheidung und Grund speichern,
+- jeder PMID pro Empfehlung höchstens einmal,
+- Evidenz darf nur verwendet werden, wenn Population, Intervention,
+  Comparator, Outcome und klinische Aussage passen.
+
+----------------------------------------------------------------------
+7.14 Neue Meta-Analyse wurde zu schnell als Änderungsgrund gewertet
+----------------------------------------------------------------------
+
+Beobachtung:
+
+Das Vorliegen einer neuen Meta-Analyse wurde teilweise implizit als
+Signal für eine geänderte Empfehlung behandelt.
+
+Aktuelle Präventionsregel:
+
+Eine Empfehlung ändert sich nur, wenn die neue Evidenz die konkrete
+klinische Handlungs- oder Aussagelogik ausreichend verändert.
+
+Zu prüfen:
+
+- Population,
+- Intervention,
+- Comparator,
+- Outcomes,
+- Setting,
+- Direktheit,
+- Effektgröße,
+- Präzision,
+- Sicherheit,
+- bisheriger Empfehlungskontext.
+
+----------------------------------------------------------------------
+7.15 Formales GRADE aus Abstracts
+----------------------------------------------------------------------
+
+Beobachtung:
+
+Abstracts enthalten meist nicht genug Informationen für ein formales
+GRADE.
+
+Aktuelle Präventionsregel:
+
+- kein formales GRADE aus Abstracts,
+- interne AISurgeon-Evidenzklasse,
+- Confidence/Unsicherheit separat,
+- Full-Text-Bedarf in Review-Metadaten,
+- natives Leitlinien-Grading unverändert speichern.
+
+----------------------------------------------------------------------
+7.16 Cross-Item-Kontamination
+----------------------------------------------------------------------
+
+Beobachtung:
+
+Große Multi-Empfehlungs-Prompts können Inhalte verschiedener Items
+vermischen.
+
+Aktuelle Präventionsregel:
+
+- eine Empfehlung oder ein Statement pro Synthese-Job,
+- nur verknüpfter Kontext,
+- eigenes Schema pro Item,
+- eigene Quellenliste pro Item,
+- eigene Validierung pro Item.
+
+----------------------------------------------------------------------
+7.17 Abgeschnittene JSON-Antworten
+----------------------------------------------------------------------
+
+Beobachtung:
+
+Bei komplexen Empfehlungen entstanden Antworten mit:
+„Invalid JSON: EOF while parsing a string“.
+
+Frühere Korrekturen:
+
+- problematisches Item einzeln neu starten,
+- max_output_tokens erhöhen,
+- reasoning effort anpassen,
+- Resume verwenden.
+
+Aktuelle Präventionsregel:
+
+- Structured Outputs,
+- Ausgabelängen vorab begrenzen,
+- große Evidence Packets priorisieren/chunken,
+- Response vollständig validieren,
+- bei EOF targeted retry nur für dieses Item,
+- bereits erfolgreiche Items nicht wiederholen.
+
+----------------------------------------------------------------------
+7.18 Unzureichende Struktur des Update-Outputs
+----------------------------------------------------------------------
+
+Beobachtung:
+
+Frühe Drafts unterschieden Empfehlungstext, Kommentarupdate,
+Full-Text-Bedarf und Quellenverwendung nicht klar genug.
+
+Aktuelle Mindestfelder:
+
+- exact_old_recommendation,
+- proposed_recommendation,
+- recommendation_changed,
+- comment_updated,
+- update_decision,
+- change_rationale,
+- old_rationale,
+- new_evidence,
+- updated_rationale,
+- conclusion,
+- used_old_reference_ids,
+- used_new_reference_ids,
+- unused_sources_with_reason,
+- full_text_review_required,
+- full_text_review_source_ids,
+- safety_signal,
+- uncertainty,
+- human_validation_required.
+
+----------------------------------------------------------------------
+7.19 Review-Metadaten im öffentlichen Leitlinientext
+----------------------------------------------------------------------
+
+Beobachtung:
+
+In frühen DOCX-Versionen und auch im Pankreas-v5.2-Draft erschienen
+Formulierungen wie:
+
+- „Volltextprüfung erforderlich“,
+- „auf Abstractbasis“,
+- „Mapping“,
+- „LLM confidence“,
+- „Review erforderlich“.
+
+Im Beispiel-PDF stehen solche internen Hinweise unter anderem in
+Schlussfolgerungen und Kommentaren, obwohl sie in den Review-Layer
+gehören.
+
+Aktuelle Präventionsregel:
+
+Diese Begriffe sind im öffentlichen Empfehlungsteil grundsätzlich
+gesperrt:
+
+- Volltextprüfung,
+- Full-text review,
+- Abstractbasis,
+- Evidence Packet,
+- Mapping,
+- Prompt,
+- LLM confidence,
+- Review erforderlich,
+- interne Item-IDs,
+- Debug-Informationen.
+
+Eine allgemeine methodische Limitation zur Abstractbasis darf einmal im
+Methodenteil stehen. Itembezogene Prüfaufträge gehören ausschließlich in
+Review-Excel/JSON.
+
+----------------------------------------------------------------------
+7.20 Zweiter GPT-Umschreibeschritt nach der Synthese
+----------------------------------------------------------------------
+
+Beobachtung:
+
+Ein zusätzlicher GPT-Schritt zur Neuformatierung hätte bereits
+freigegebenen Inhalt erneut verändert.
+
+Aktuelle Präventionsregel:
+
+- Der Empfehlungssynthese-Output wird eingefroren.
+- Danach nur deterministische Formatierung und Referenzlogik.
+- Eine erneute inhaltliche GPT-Bearbeitung ist nur als gezielter,
+  menschlich angeforderter Re-Review eines einzelnen Items zulässig.
+
+----------------------------------------------------------------------
+7.21 Referenzparser verwechselte Inline-Zitate und Bibliografie
+----------------------------------------------------------------------
+
+Beobachtung:
+
+Eckige Klammern wie [557] wurden teilweise als Beginn eines
+Literaturverzeichniseintrags interpretiert. Literaturzeilen wurden
+zusammengezogen.
+
+Im Pankreas-v5.2-PDF zeigt Seite 151 sichtbare Fehler:
+
+- fehlende Nummernfolge,
+- zusammengezogene Einträge,
+- doppelte oder verschmolzene URLs,
+- potenziell doppelte Referenzen.
+
+Aktuelle Präventionsregel:
+
+- Literaturverzeichnis als eigene native Objektklasse extrahieren.
+- Originalnummer, Raw Citation und normalisierte Citation getrennt.
+- Keine reine Regex-Zeilenanalyse als einzige Quelle.
+- Jeder finale Zitatcode löst genau eine Referenz auf.
+- Deduplizierung nach PMID, DOI, danach normalisiertem Titel.
+- Fehlende Nummern, doppelte Nummern und verschmolzene Einträge sind
+  harte QC-Fehler.
+
+----------------------------------------------------------------------
+7.22 Getrennte alte Nummern und N001-Codes im finalen Dokument
+----------------------------------------------------------------------
+
+Beobachtung:
+
+Im Pankreas-Draft blieben alte Nummern und neue N001-Codes getrennt.
+Das erschwerte einen einheitlichen publizierbaren Referenzapparat.
+
+Aktuelle verbindliche Entscheidung:
+
+- Interne Codes bleiben im Audit:
+  OLD-xxxx, NEW-PMID-xxxxxxxx, TABLE-xxxx, ALG-xxxx.
+- Die finale DOCX verwendet eine einheitliche fortlaufende numerische
+  Zitierung nach erster Nennung:
+  [1], [2-4], [5, 7].
+- Eine Referenz-Mapping-Datei erhält die vollständige Alt-/Neu-Provenienz.
+- Im finalen Text dürfen OLD-, LG-NEW-, NEW-PMID- oder N001-Codes nicht
+  vorkommen.
+
+----------------------------------------------------------------------
+7.23 Unzureichende erste DOCX-Versionen
+----------------------------------------------------------------------
+
+Beobachtung:
+
+Frühe Dokumentgeneratoren hatten:
+
+- zu einfache Boxen,
+- Volltextprüfung im Haupttext,
+- unzureichendes Inhaltsverzeichnis,
+- fehlende alte Bibliografie,
+- keine klaren Statusfelder,
+- zu wenig Ähnlichkeit zu professionellen Leitlinien.
+
+Korrekturen:
+
+- echte Tabellenboxen,
+- Seitenzahlen,
+- Word-TOC-Feld,
+- getrennte Review-Datei,
+- ClinicalTrials.gov-inspirierte Farbstruktur,
+- linksbündige Empfehlungstexte,
+- Blocksatz nur im Fließtext.
+
+Aktuelle Regel:
+
+DOCX wird ausschließlich aus strukturierten, validierten Objekten
+deterministisch gebaut.
+
+----------------------------------------------------------------------
+7.24 Falsche oder abgeschnittene Typbezeichnung in der Box
+----------------------------------------------------------------------
+
+Beobachtung im Pankreas-v5.2-PDF:
+
+Auf Seite 17 steht im mittleren Kopfbereich der Box nicht der formale
+Typ, sondern der abgeschnittene Text „Eine spezifische Diätempfehlung
+zur“. Ähnliche Fehler entstanden, wenn Titel-, Themen- und Textfelder
+vertauscht wurden.
+
+Aktuelle Präventionsregel:
+
+Die mittlere Kopfzelle darf ausschließlich einen validierten formalen Typ
+enthalten, zum Beispiel:
+
+- Evidenzbasierte Empfehlung,
+- Konsensbasierte Empfehlung,
+- Evidenzbasiertes Statement,
+- Konsensbasiertes Statement,
+- Expertenkonsens,
+- vom Original abweichende weitere native Typen.
+
+Der Typ wird gegen die Dokumentkarte validiert. Freier Empfehlungstext
+ist in dieser Zelle unzulässig.
+
+----------------------------------------------------------------------
+7.25 „GPT-basiert“ ersetzte native Evidenz- und Konsensangaben
+----------------------------------------------------------------------
+
+Beobachtung im Pankreas-v5.2-PDF:
+
+Bei geänderten Items steht in der Zeile „Evidenz / Konsens“ teilweise nur
+„GPT-basiert“. Dadurch gehen die ursprünglichen nativen Angaben verloren
+oder werden mit der Herkunft des Update-Vorschlags verwechselt.
+
+Aktuelle Präventionsregel:
+
+- native Evidenz-, Empfehlungs- und Konsensangaben bleiben erhalten,
+- Update-Provenienz ist ein separates Feld,
+- „GPT-basiert“ darf niemals einen Evidenzgrad oder Konsens ersetzen,
+- bessere Bezeichnung:
+  „Update-Vorschlag: KI-gestützt, menschlich nicht freigegeben“,
+- nach menschlicher Freigabe wird der Reviewstatus aktualisiert, nicht
+  das native Grading überschrieben.
+
+----------------------------------------------------------------------
+7.26 Geänderte Empfehlung ohne sichtbaren alten Wortlaut
+----------------------------------------------------------------------
+
+Beobachtung im Pankreas-v5.2-PDF:
+
+Bei „Geändert: ja“ wird häufig nur der vorgeschlagene neue Text gezeigt.
+Der alte exakte Wortlaut ist nicht direkt daneben erkennbar.
+
+Aktuelle Präventionsregel:
+
+- unverändert:
+  genau ein Empfehlungstext,
+- geändert:
+  „Bisherige Empfehlung/Statement“ wortgetreu und
+  „Vorgeschlagene aktualisierte Empfehlung/Statement“ klar getrennt,
+- kein Überschreiben des alten Textes,
+- optische Unterscheidung ohne inhaltliche Wertung.
+
+----------------------------------------------------------------------
+7.27 Doppelte Überschriften und unklare Nummerierung
+----------------------------------------------------------------------
+
+Beobachtung:
+
+Frühere Word-Dateien enthielten teils Überschriften direkt vor einer Box,
+obwohl die Box dieselbe Information nochmals enthielt. Literaturkapitel
+konnten Nummern verwenden, die bereits im klinischen Hauptteil vergeben
+waren.
+
+Aktuelle Präventionsregel:
+
+- Jede Überschrift genau einmal.
+- Klinische Originalkapitel behalten ihre Nummerierung.
+- Front Matter wird unnummeriert oder römisch nummeriert.
+- Literatur und Anhänge erhalten eindeutige, nicht kollidierende
+  Nummerierung oder unnummerierte Überschriften.
+- Automatischer Duplicate-Heading-Test.
+
+----------------------------------------------------------------------
+7.28 Footer- und Feldfehler
+----------------------------------------------------------------------
+
+Beobachtung im Pankreas-v5.2-PDF:
+
+Footer wie „Seite17von203| Automatisch generierter Draft - human
+validation required“ enthalten fehlende Leerzeichen und Sprachmischung.
+
+Aktuelle Präventionsregel:
+
+Einheitlicher deutscher Footer, zum Beispiel:
+
+„Seite 17 von 203 | Automatisch generierter Entwurf -
+menschliche Validierung erforderlich“
+
+- Leerzeichen deterministisch,
+- keine Sprachmischung,
+- keine harten Seitenzahlen,
+- Word-Felder oder deterministische PDF-Erzeugung,
+- Titelblatt optional ohne Footer.
+
+----------------------------------------------------------------------
+7.29 Word Dark Mode
+----------------------------------------------------------------------
+
+Beobachtung:
+
+Eine dunkle Darstellung in Word wurde zunächst als DOCX-Fehler
+interpretiert.
+
+Aktuelle Präventionsregel:
+
+Dark Mode ist ein Office-UI-Zustand. Die Dokumentfarben werden anhand
+der tatsächlichen Seitenfarbe, XML-Fills und eines PDF-Renders geprüft.
+
+----------------------------------------------------------------------
+7.30 Unkoordinierte parallele Entwicklung
+----------------------------------------------------------------------
+
+Zentraler Entwicklungslaptop:
+
+LAPTOP-Q5JVQTL4
+
+Übernehmender Laptop:
+
+LAPTOP-JGER957R
+
+Aktuelle Präventionsregel:
+
+- zentrale Änderungen nur auf dem Entwicklungslaptop,
+- Commit und Push nach Prüfung,
+- zweiter Laptop:
+  git pull --ff-only
+  uv sync --frozen
+- keine parallele unabhängige Änderung derselben zentralen Dateien,
+- unterschiedliche Worker-IDs und lokale Pfade,
+- identischer Git-Commit bei Produktionsläufen.
+
+----------------------------------------------------------------------
+7.31 Geheimnisse in Git, Logs oder Chat
+----------------------------------------------------------------------
+
+Aktuelle Präventionsregel:
+
+- .env lokal und in .gitignore,
+- .env.example ohne Werte,
+- Dateirechte lokal restriktiv,
+- API-Schlüssel nie ausgeben,
+- keine Auth-Dateien lesen,
+- Redaction-Tests für config-check und Logs,
+- keine Patientendaten in dieser Pipeline.
+
+======================================================================
+8. VERBINDLICHE DOCX-SPEZIFIKATION
+======================================================================
+
+8.1 Grundprinzip
+----------------
+
+Das Pankreas-v5.2-PDF ist ein visueller Anhaltspunkt für:
+
+- klare blaue Kapitelüberschriften,
+- strukturierte Empfehlungskästen,
+- sichtbare Änderungskennzeichnung,
+- getrennte Kommentare,
+- Titel- und Metadatenseite,
+- Inhaltsverzeichnis,
+- Referenzabschnitte.
+
+Die Fehler und Inkonsistenzen dieses PDFs dürfen nicht reproduziert
+werden.
+
+Die DOCX muss PDF-adaptiv sein:
+
+- Sie zeigt nur Felder, die im Original oder im Updateobjekt tatsächlich
+  vorhanden sind.
+- Fehlende Grading- oder Konsensfelder werden nicht erfunden.
+- Keine leere künstliche Tabellenzeile nur zur optischen Symmetrie.
+- Originalstruktur und Chronologie bleiben erkennbar.
+- Tabellen, Algorithmen und Decision Trees werden nur eingefügt, wenn sie
+  im Original vorhanden und relevant sind.
+
+8.2 Dokumentaufbau
+------------------
+
+Empfohlene Reihenfolge:
+
+1. Titelseite
+2. Dokumentmetadaten
+3. Inhaltsverzeichnis
+4. Haftungsausschluss und Geltungsbereich
+5. Methodik
+6. Legende und Abkürzungen
+7. Einleitung
+8. „Was ist neu?“
+9. klinischer Hauptteil in Originalchronologie
+10. konsolidiertes Literaturverzeichnis
+11. optionale Anhänge
+
+Nummerierungsregel:
+
+- Front Matter unnummeriert oder mit römischen Ziffern,
+- klinischer Hauptteil behält möglichst die Originalnummerierung,
+- Literatur und Anhänge kollisionsfrei,
+- keine doppelte Kapitelnummer.
+
+8.3 Titelseite
+--------------
+
+Pflichtfelder, soweit vorhanden:
+
+- Dokumenttitel,
+- Originalleitlinie,
+- Herausgeber/Quelle,
+- AWMF-ID oder andere Register-ID,
+- Originalversion und Jahr,
+- Originalstatus, zum Beispiel gültig oder abgelaufen,
+- Update-Entwurfsversion,
+- Erstellungs-/Update-Datum,
+- Status:
+  „Automatisch unterstützter Entwurf“,
+- Validierungsstatus,
+- Source Lock ID,
+- Pipeline-Version,
+- optional Git-Commit.
+
+Die KI darf nicht ohne ausdrückliche Autorenschaftsentscheidung als
+menschlicher Autor dargestellt werden. KI-Beitrag und Modellversion werden
+transparent als Erstellungsmethode oder technischer Beitrag angegeben.
+
+8.4 Seitenformat und Grundtypografie
+------------------------------------
+
+Standard:
+
+- A4 Hochformat,
+- Seitenränder 2,5 cm,
+- Schriftfamilie Arial,
+- Fließtext 12 pt,
+- Fließtext 1,5-zeilig,
+- Absatzabstand nach Fließtext 6 pt,
+- Überschrift 1: 16 pt, fett,
+- Überschrift 2: 14 pt, fett,
+- Überschrift 3: 12 pt, fett,
+- Kapitelüberschriften in heading_color,
+- Empfehlungstexte linksbündig,
+- Referenzen linksbündig,
+- übriger Fließtext grundsätzlich Blocksatz,
+- keine manuell eingefügten Leerzeilenketten zur Positionierung.
+
+Für kompakte Empfehlungskästen darf die Zeilenhöhe auf 1,15–1,3 reduziert
+werden, wenn:
+
+- Schrift nicht unter 11 pt fällt,
+- Lesbarkeit erhalten bleibt,
+- der Wert in der Dokumentkonfiguration festgelegt ist.
+
+8.5 Farbpalette
+---------------
+
+Pro Leitlinie genau eine dezente, konfigurierte Farbpalette:
+
+- primary_color,
+- secondary_color,
+- light_box_color,
+- border_color,
+- heading_color,
+- changed_accent_color,
+- warning_color.
+
+Default-Anhaltspunkt aus dem Pankreas-Draft:
+
+- dunkles gedecktes Blau für Kopfzeilen,
+- helles Blau für Metadatenfelder,
+- weiß bis sehr helles Grau für Textfelder,
+- blaue Kapitelüberschriften.
+
+Die Palette darf pro Leitlinie angepasst werden, bleibt innerhalb eines
+Dokuments aber konsistent.
+
+8.6 Empfehlungskasten
+---------------------
+
+Vor jeder Box steht höchstens eine klinisch sinnvolle Überschrift:
+
+„<Originalnummer> - <formaler Typ> - <Themenlabel>“
+
+Keine doppelte identische Überschrift.
+
+Baseline-Aufbau:
+
+Kopfzeile mit drei Spalten:
+
+1. Originalnummer: ca. 18 %
+2. formaler Typ: ca. 52 %
+3. Änderungsstatus: ca. 30 %
+
+Kopfzeile:
+
+- primary_color,
+- weiße Schrift,
+- fett,
+- vertikal mittig,
+- linksbündig.
+
+Zulässiger Inhalt der mittleren Kopfzelle:
+
+- ausschließlich validierter formaler Typ.
+
+Statuszelle:
+
+- „Geändert: nein“
+- oder „Geändert: ja“
+- optional separate zweite Zeile:
+  „Update-Vorschlag: KI-gestützt; nicht freigegeben“
+
+Nicht zulässig:
+
+- recommendation_text in der Typzelle,
+- interne change_type-Codes,
+- „comment_update_only“,
+- Confidence,
+- Prompt- oder Modellparameter,
+- „GPT-basiert“ als Evidenzgrad.
+
+8.7 Darstellung unveränderter Items
+-----------------------------------
+
+Bei unveränderter Empfehlung beziehungsweise unverändertem Statement:
+
+- nur ein aktueller Empfehlungstext,
+- exakt der Originalwortlaut,
+- keine zweite Box „bisherig“ plus identischer Text „aktualisiert“,
+- Status „Geändert: nein“,
+- Kommentarstatus kann separat „Kommentar aktualisiert: ja/nein“ lauten.
+
+8.8 Darstellung geänderter Items
+--------------------------------
+
+Bei tatsächlicher Textänderung zwingend:
+
+1. Bisherige Empfehlung/Statement
+   - wortgetreu,
+   - klar als Original gekennzeichnet.
+
+2. Vorgeschlagene aktualisierte Empfehlung/Statement
+   - klar getrennt,
+   - als Vorschlag gekennzeichnet,
+   - nicht als offiziell konsentiert darstellen.
+
+Die beiden Texte können:
+
+- in zwei gestapelten Boxbereichen,
+- oder in zwei klar benannten Zeilen derselben Box
+
+erscheinen.
+
+Eine Änderung darf nicht nur durch „Geändert: ja“ markiert sein, während
+der alte Wortlaut fehlt.
+
+8.9 Dynamische native Metadatenzeilen
+-------------------------------------
+
+Mögliche Zeilen:
+
+- Empfehlungsgrad,
+- Level of Evidence,
+- Konsensstärke,
+- Status/Jahr,
+- weitere native Originalfelder.
+
+Regeln:
+
+- nur anzeigen, wenn im Original vorhanden,
+- raw value erhalten,
+- keine Erfindung,
+- kein automatisches „-“ bei fehlendem Feld,
+- Originalfeld und normalisierte Interpretation getrennt,
+- native Metadaten bei Änderung nicht durch Update-Provenienz ersetzen.
+
+Bei sinnvoller Kürze dürfen native Evidenz- und Konsenswerte in einer
+Zeile „Evidenz / Konsens“ zusammengeführt werden. Der vollständige Raw
+Value muss im Datenobjekt erhalten bleiben.
+
+8.10 Kommentar- und Begründungsstruktur
+---------------------------------------
+
+Die öffentliche Darstellung ist source-adaptiv.
+
+Kernabschnitte:
+
+- Bisherige Begründung
+- Neue Evidenz
+- Aktualisierte Begründung
+- Schlussfolgerung
+
+Regeln:
+
+- Fehlt ein separater Originalkommentar nach validierter Extraktion, darf
+  dies neutral angegeben werden.
+- Leere Abschnitte werden nicht als künstliche Überschrift ausgegeben.
+- „Bisherige Begründung“ ist wortgetreu oder ausdrücklich als
+  quellengebundene Zusammenfassung gekennzeichnet.
+- „Neue Evidenz“ enthält nur tatsächlich verwendete Quellen.
+- „Aktualisierte Begründung“ integriert alte und neue Evidenz, ohne den
+  Source Layer zu überschreiben.
+- „Schlussfolgerung“ nennt die Updateentscheidung.
+- Itembezogene Full-Text-Aufträge bleiben im Review-Layer.
+
+Standardformat:
+
+- Unterüberschriften fett in heading_color,
+- Fließtext 12 pt,
+- 1,5-zeilig,
+- Blocksatz,
+- keine blauen Vollflächen hinter langen Kommentaren.
+
+8.11 Tabellen, Algorithmen und Decision Trees
+---------------------------------------------
+
+Nur Originalobjekte verwenden.
+
+Pro Objekt speichern und im DOCX berücksichtigen:
+
+- object_id,
+- Originalseite,
+- Bounding Box,
+- Crop-Datei,
+- Titel,
+- Caption,
+- Fußnoten,
+- linked_recommendation_ids,
+- extraction_quality.
+
+Darstellung:
+
+- proportional skalieren,
+- nicht inhaltlich verändern,
+- maximale Seitenbreite beachten,
+- mindestens ausreichende Renderauflösung,
+- Caption und Originalseite angeben,
+- keine abgeschnittenen Fußnoten,
+- kein de-novo-Neuzeichnen als angebliches Original.
+
+Wenn kein entsprechendes Originalobjekt existiert, wird keines erfunden.
+
+8.12 „Was ist neu?“
+-------------------
+
+Enthält:
+
+- Anzahl formaler Items,
+- Anzahl unveränderter Empfehlungen,
+- Anzahl rationale_updated,
+- Anzahl recommendation_modified,
+- Anzahl insufficient_evidence,
+- Anzahl review_required.
+
+Danach:
+
+- geänderte Empfehlungstexte mit Alt/Neu-Darstellung,
+- optional kurze Liste wesentlicher Begründungsupdates.
+
+Keine vollständige Wiederholung aller unveränderten Items.
+
+Zahlen werden ausschließlich aus validierten Updateobjekten berechnet.
+
+8.13 Inhaltsverzeichnis
+-----------------------
+
+- echtes Word-TOC-Feld oder deterministisch erzeugtes TOC,
+- basiert auf Heading-Styles,
+- Seitenzahlen nach Feldaktualisierung prüfen,
+- keine manuellen Punktlinien,
+- keine doppelten Überschriften,
+- Inhaltsverzeichnis selbst erhält keinen identischen doppelten Eintrag.
+
+8.14 Kopf- und Fußzeilen
+------------------------
+
+Standard:
+
+- Titelblatt optional ohne Kopf-/Fußzeile,
+- danach dezente Linie oder Projekttitel,
+- automatische Seitenzahl,
+- konsistenter deutscher Validierungshinweis.
+
+Beispiel:
+
+„Seite X von Y | Automatisch unterstützter Entwurf -
+menschliche Validierung erforderlich“
+
+Keine fehlenden Leerzeichen, keine Sprachmischung.
+
+8.15 Referenzen
+---------------
+
+Finale DOCX:
+
+- ein konsolidiertes, numerisch fortlaufendes Literaturverzeichnis,
+- Nummerierung nach erster Nennung,
+- Zitate:
+  [1], [2-4], [5, 7],
+- linksbündig,
+- Hanging Indent,
+- nicht im Blocksatz,
+- konsistenter bibliografischer Stil,
+- keine internen Screeninglabels,
+- keine OLD-/NEW-/N-Codes.
+
+Reference Mapping separat:
+
+- final_reference_number,
+- internal_reference_id,
+- old_or_new,
+- original_reference_number,
+- PMID,
+- DOI,
+- normalized_title,
+- full_citation,
+- used_in_recommendation_ids,
+- first_seen_in_recommendation_id.
+
+8.16 Seitenumbrüche und Stabilität
+---------------------------------
+
+- Empfehlungskasten möglichst nicht über Seiten trennen.
+- Headerzeile nie allein am Seitenende.
+- Überschrift mit folgendem Kasten zusammenhalten.
+- Keine leere Seite durch manuelle Page Breaks.
+- Widow-/Orphan-Control.
+- Lange Tabellen dürfen kontrolliert umbrechen, aber Kopfzeilen werden
+  wiederholt.
+- Bilder/Crops dürfen nicht verzerrt werden.
+
+======================================================================
+9. DOCX-QC UND VISUELLE REGRESSION
+======================================================================
+
+9.1 Inhaltliche Assertions
+--------------------------
+
+- jede Empfehlung genau einmal,
+- korrekte Chronologie,
+- keine doppelte recommendation_id,
+- keine fehlende formale Nummer ohne dokumentierten Grund,
+- unverändert = genau ein Empfehlungstext,
+- geändert = alter und neuer Text vorhanden,
+- native Metadaten nicht überschrieben,
+- kein leeres künstliches Grading-Feld,
+- keine Referenz in falschem Feld,
+- jeder Kommentar dem richtigen Item zugeordnet.
+
+9.2 Verbotene Begriffe im öffentlichen Dokument
+-----------------------------------------------
+
+Automatischer Scan auf:
+
+- OLD-
+- LG-NEW-
+- NEW-PMID-
+- N001 oder analoge N-Codes,
+- PANCREAS_OLD_ITEM,
+- interne recommendation_id,
+- full_text_review_required,
+- Volltextprüfung,
+- Abstractbasis,
+- Evidence Packet,
+- Mapping,
+- LLM confidence,
+- Debug,
+- Prompt.
+
+Ausnahme:
+
+Eine allgemeine methodische Beschreibung der Abstract-Limitation im
+Methodenkapitel ist zulässig.
+
+9.3 Typ- und Box-QC
+------------------
+
+- mittlere Kopfzelle entspricht erlaubtem formalem Typ,
+- kein Fragment des Empfehlungstextes in der Typzelle,
+- Statuszelle korrekt,
+- „GPT-basiert“ nicht in Evidenz-/Konsenszeile,
+- keine abgeschnittenen Zelltexte,
+- keine unerwarteten internen Felder.
+
+9.4 Referenz-QC
+---------------
+
+- alle zitierten Nummern existieren,
+- jede finale Nummer genau einmal in der Liste,
+- keine Lücke in der fortlaufenden finalen Nummerierung,
+- keine doppelten PMIDs,
+- keine doppelten DOIs,
+- Titel-Deduplizierung als Fallback,
+- keine verschmolzenen Einträge,
+- keine zusammengeklebten URLs,
+- keine falsche Studientypanzeige im Literaturverzeichnis,
+- keine unzitierten neuen Quellen ohne dokumentierte Begründung.
+
+9.5 Rendering-QC
+----------------
+
+Nach DOCX-Erzeugung:
+
+1. DOCX in PDF konvertieren.
+2. PDF rendern.
+3. Repräsentative Seiten visuell prüfen.
+
+Pflichtseiten für Golden-/Snapshot-Test:
+
+- Titelseite,
+- erste TOC-Seite,
+- „Was ist neu?“,
+- unveränderte kurze Empfehlung,
+- geänderte Empfehlung mit Alt/Neu,
+- lange Empfehlung mit Aufzählung,
+- Seite mit zwei Empfehlungskästen,
+- Seite mit Originaltabelle/Decision Tree,
+- erste Referenzseite,
+- letzte Referenzseite.
+
+Zu prüfen:
+
+- keine Überlappung,
+- kein Clipping,
+- keine schwarzen Kästen,
+- keine kaputten Zeichen,
+- keine falsche Schrift,
+- keine zu kleinen Texte,
+- keine abgeschnittenen Boxen,
+- keine leeren Seiten,
+- konsistente Farben,
+- korrekte Footer.
+
+Das Pankreas-v5.2-PDF zeigt als konkrete Warnbeispiele:
+
+- Seite 17:
+  falscher Inhalt in der Typzelle.
+- Seite 70:
+  interne Volltextprüfungslogik im öffentlichen Kommentar.
+- Seite 151:
+  fehlerhafte/verschmolzene alte Bibliografie.
+- Seite 184:
+  uneinheitliche neue Referenzdarstellung und Screeningmetadaten.
+- Footer:
+  fehlende Leerzeichen und Sprachmischung.
+
+======================================================================
+10. REVIEW- UND AUSGABEOBJEKTE
+======================================================================
+
+Pro Leitlinie werden mindestens erzeugt:
+
+1. source_lock_manifest.json
+2. document_map.json
+3. recommendations.jsonl
+4. comments.jsonl
+5. references.jsonl
+6. tables.jsonl
+7. algorithms.jsonl
+8. search_units.jsonl
+9. pubmed_queries.jsonl
+10. evidence_mapping.jsonl
+11. syntheses.jsonl
+12. update_decisions.jsonl
+13. review.xlsx
+14. reference_mapping.xlsx
+15. consolidated_living_guideline.docx
+16. change_report.docx oder change_report.xlsx
+17. audit.jsonl
+18. final_run_manifest.json
+19. optional gerenderte PDF
+
+======================================================================
+11. ZWEI-LAPTOP-REGELN
+======================================================================
+
+Zentraler Entwicklungslaptop:
+
+LAPTOP-Q5JVQTL4
+
+Übernehmender Laptop:
+
+LAPTOP-JGER957R
+
+Gemeinsam und identisch:
+
+- Repository,
+- Git-Commit,
+- Python-Version,
+- uv.lock,
+- Schemas,
+- Taxonomie,
+- Prompts,
+- Modellkonfiguration,
+- Tests,
+- DOCX-Spezifikation.
+
+Lokal unterschiedlich:
+
+- AISURGEON_WORKER_ID,
+- AISURGEON_DATA_ROOT,
+- AISURGEON_PDF_SOURCE_DIR,
+- API-Schlüssel,
+- Cache,
+- zugewiesene Jobs.
+
+Nach git pull auf dem zweiten Laptop:
+
+git pull --ff-only
+uv sync --frozen
+uv run aisurgeon setup-local --worker-id ... --pdf-source-dir ...
+
+Der Setup-Befehl erstellt lokale Datenunterordner automatisch und
+überschreibt keine vorhandenen Daten.
+
+======================================================================
+12. MINIMALE CLI
+======================================================================
+
+Erste Befehle:
+
+- aisurgeon --help
+- aisurgeon config-check
+- aisurgeon setup-local
+
+setup-local:
+
+- liest Worker-ID und PDF-Pfad aus Parametern oder .env,
+- erstellt runs, cache, exports und logs,
+- überschreibt nichts,
+- validiert Quellordner,
+- gibt keine Schlüssel aus,
+- ist idempotent.
+
+config-check:
+
+- prüft erforderliche Variablen,
+- zeigt nur „gesetzt/fehlt“ für Schlüssel,
+- prüft Pfade,
+- zeigt Python-Version, Plattform und Worker-ID,
+- liefert klare Exit-Codes.
+
+======================================================================
+13. ERSTE PROJEKTSTRUKTUR
+======================================================================
+
+Repository:
+
+- README.md
+- AGENTS.md
+- pyproject.toml
+- uv.lock
+- .python-version
+- .gitignore
+- .env.example
+
+Python unter src/aisurgeon:
+
+- cli
+- config
+- domain
+- extraction
+- normalization
+- validation
+- taxonomy
+- ids
+- references
+- search
+- mapping
+- synthesis
+- review
+- documents
+- orchestration
+- storage
+- api
+- mcp
+
+Weitere Verzeichnisse:
+
+- tests/unit
+- tests/integration
+- tests/fixtures
+- tests/golden
+- schemas
+- config/taxonomy
+- config/prompts
+- config/models
+- config/pipelines
+- docs/architecture
+- docs/methodology
+- docs/operations
+- docs/compliance
+- scripts
+- infra
+- data/README.md
+
+Zu Beginn nur minimale, getestete Strukturen. Keine unnötige
+Vorabimplementierung von PostgreSQL, Redis, API oder MCP vor dem Pilot.
+
+======================================================================
+14. RUN-MANIFEST
+======================================================================
+
+Jeder Lauf speichert mindestens:
+
+- run_id,
+- worker_id,
+- source_id,
+- pdf_filename,
+- pdf_sha256,
+- git_commit,
+- git_branch,
+- dirty_worktree,
+- Python-Version,
+- uv_lock_hash,
+- pipeline_version,
+- schema_version,
+- taxonomy_version,
+- prompt_version,
+- model_provider,
+- model_id,
+- Modellparameter,
+- start_time,
+- end_time,
+- status,
+- Inputdateien mit SHA-256,
+- Outputdateien mit SHA-256,
+- Record Counts,
+- Fehler,
+- Reparaturen,
+- Kosten und Tokenverbrauch.
+
+======================================================================
+15. MANUELLE REVIEW-GATES
+======================================================================
+
+Gate 1 - Source Lock
+--------------------
+
+Nur weiter, wenn:
+
+- Empfehlungen vollständig,
+- Statements vollständig,
+- Kommentare ausreichend zugeordnet,
+- Referenzen vollständig,
+- Tabellen/Algorithmen inventarisiert,
+- Seitenanker vorhanden,
+- Unicode-QC bestanden,
+- PDF-Hash gespeichert,
+- unresolved objects dokumentiert.
+
+Gate 2 - Search Units
+---------------------
+
+Nur weiter, wenn:
+
+- Subitems vom Original getrennt,
+- Queries Englisch,
+- Suchzeitraum korrekt,
+- keine zentrale klinische Frage fehlt.
+
+Gate 3 - Mapping
+----------------
+
+Nur weiter, wenn:
+
+- Mapping nachvollziehbar,
+- Deduplizierung bestanden,
+- direkte und indirekte Evidenz getrennt,
+- falsche positive Zuordnungen kontrolliert.
+
+Gate 4 - Synthese
+-----------------
+
+Nur weiter, wenn:
+
+- jedes Item genau eine Updateentscheidung,
+- modified nur bei Textänderung,
+- rationale_updated ohne Textänderung,
+- Unsicherheit und Full-Text-Bedarf im Review-Layer,
+- keine erfundenen Referenzen.
+
+Gate 5 - DOCX
+-------------
+
+Nur weiter, wenn:
+
+- alle DOCX-Assertions bestanden,
+- visuelle Golden-Seiten geprüft,
+- Referenz-QC bestanden,
+- Alt/Neu korrekt,
+- keine internen Codes im öffentlichen Text,
+- menschliche Freigabe dokumentiert.
+
+======================================================================
+16. AKZEPTANZKRITERIEN TECHNISCHER SMOKE-TEST
+======================================================================
+
+- PDF eindeutig registriert.
+- SHA-256 stimmt.
+- Seitenzahl stimmt.
+- Dokumentkarte ist plausibel.
+- Formale Empfehlungen und Statements chronologisch.
+- Originaltexte wortgetreu.
+- Kommentare richtig zugeordnet.
+- Seitenanker vorhanden.
+- Native Gradingfelder korrekt oder als nicht vorhanden dokumentiert.
+- Referenzen verknüpft.
+- Tabellen und Algorithmen als Originalobjekte erhalten.
+- Schema-Validierung läuft.
+- Fehler führen zu targeted repair.
+- Audit-Manifest vollständig.
+- Keine Schlüssel in Git, Logs oder Testausgaben.
+
+======================================================================
+17. AKZEPTANZKRITERIEN VOLLSTÄNDIGER PILOT
+======================================================================
+
+Zusätzlich:
+
+- sinnvolle englische Suchstrategien,
+- reproduzierbare PubMed-Abfragen,
+- angemessene Studientypen pro Frage,
+- nachvollziehbares Mapping,
+- medizinisch korrekte Synthese,
+- konservative Updateentscheidung,
+- klare Unsicherheit,
+- keine erfundenen Referenzen,
+- fachlich überzeugende Review-Datei,
+- professioneller deterministischer DOCX-Output,
+- korrekte Originaltabellen/Algorithmen,
+- menschliche Freigabe aller klinisch relevanten Änderungen.
+
+======================================================================
+18. ANWEISUNG AN CODEX
+======================================================================
+
+Vor jeder größeren Aufgabe:
+
+1. AGENTS.md und dieses Dokument lesen.
+2. Relevante Dateien und Tests prüfen.
+3. Einen kurzen Plan formulieren.
+4. Nur den beauftragten Scope ändern.
+5. Keine .env oder Auth-Dateien lesen.
+6. Keine Commits oder Pushes ohne ausdrückliche Anweisung.
+7. Ruff, pytest und relevante CLI-Smoke-Tests ausführen.
+8. DOCX-Änderungen zusätzlich rendern und visuell prüfen.
+9. Diff, Testergebnisse und Restrisiken zusammenfassen.
+10. Bei fachlicher Unklarheit stoppen und nachfragen.
+11. Keine klinischen Regeln eigenmächtig ergänzen.
+12. Historische PoC-Fehler nicht als aktuelle Soll-Architektur kopieren.
+
+======================================================================
+19. BASISDOKUMENTE UND HISTORISCHE LERNQUELLEN
+======================================================================
+
+Diese Spezifikation wurde unter anderem aus folgenden Projektartefakten
+konsolidiert:
+
+- README_LIVING_GUIDELINE_GERD_POC
+- requirements_living_guidelines
+- MethodsLivingGDL
+- AISurgeon_Handoff_Informationsextraktion_AWMF_20260708
+- AISurgeon_Framework_Taxonomy_AWMF_Progress_v0_1
+- AISurgeon_GERD_EoE_Living_Guideline_Handoff_and_Methods
+- AISurgeon Living Guideline Parallel Framework
+- AISurgeon Living Guideline Systemplan
+- Pankreas Living-Guideline PoC und v5.2-PDF
+- Hyperparathyreoidismus-Run und Source-Lock-Learnings
+
+Diese Dateien dokumentieren historische Entwicklungsschritte. Bei
+Widerspruch gilt die Prioritätsregel aus Abschnitt 0.
+
+======================================================================
+ENDE
+======================================================================
