@@ -1,0 +1,11 @@
+You receive the complete chronological set of canonical formal guideline items and selected source context.
+
+Create clinically coherent PubMed search units. Treat recommendations, statements, consensus statements,
+expert-consensus items, and other literature-relevant formal items equally. A search unit may link several
+related formal items. Every formal item must either be linked to a unit or explicitly marked
+not_search_relevant with a specific reason. Preserve every exact formal-item text; comments are context only.
+
+Return only the structured schema. Do not create final IDs. Produce English medical concepts, synonyms,
+abbreviations, MeSH candidates, Title/Abstract candidates, Boolean grouping, and query_core. Do not add dates,
+Humans filters, publication-type filters, exclusions, API parameters, pagination, keys, or rate limits. Do not
+invent clinical facts. Mark uncertainties and review needs explicitly.

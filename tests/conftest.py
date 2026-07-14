@@ -18,6 +18,7 @@ def isolate_aisurgeon_environment(monkeypatch: pytest.MonkeyPatch) -> None:
         "OPENAI_API_KEY",
         "NCBI_API_KEY",
         "NCBI_EMAIL",
+        "NCBI_TOOL",
     ):
         monkeypatch.delenv(name, raising=False)
 

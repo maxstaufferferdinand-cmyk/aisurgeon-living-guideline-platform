@@ -2,6 +2,7 @@
 
 import os
 import platform
+from datetime import date
 from pathlib import Path
 from typing import Annotated
 
@@ -18,6 +19,8 @@ from aisurgeon.extraction.gemini.document_map import (
 )
 from aisurgeon.extraction.gemini.errors import GeminiConfigurationError
 from aisurgeon.extraction.pdf_registration import PdfRegistrationError, register_pdf
+from aisurgeon.search.pubmed.generation import generate_searches
+from aisurgeon.search.pubmed.ncbi import fetch_pubmed
 
 app = typer.Typer(
     name="aisurgeon",
@@ -163,7 +166,7 @@ def _create_env_file(target: Path, settings: Settings) -> bool:
         f"AISURGEON_PDF_SOURCE_DIR={settings.pdf_source_dir or ''}\n"
         "AISURGEON_RUNS_DIR=\nAISURGEON_CACHE_DIR=\n"
         "AISURGEON_EXPORTS_DIR=\nAISURGEON_LOGS_DIR=\n\n"
-        "GEMINI_API_KEY=\nOPENAI_API_KEY=\nNCBI_API_KEY=\nNCBI_EMAIL=\n"
+        "GEMINI_API_KEY=\nOPENAI_API_KEY=\nNCBI_API_KEY=\nNCBI_EMAIL=\nNCBI_TOOL=\n"
     )
     descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
@@ -335,6 +338,105 @@ def extract_guideline(
     typer.echo(f"Run-Verzeichnis: {run_dir}")
     if dry_run:
         typer.echo("Dry Run: kein Upload und kein Gemini-API-Aufruf ausgeführt.")
+
+
+@app.command("generate-pubmed-searches")
+def generate_pubmed_searches(
+    input_run: Annotated[Path, typer.Option("--input-run")],
+    output_root: Annotated[Path, typer.Option("--output-root")],
+    env_file: EnvFileOption = None,
+    start_date: Annotated[
+        str, typer.Option("--start-date", help="Inclusive publication start date (YYYY-MM-DD).")
+    ] = "2023-01-01",
+    end_date: Annotated[
+        str | None,
+        typer.Option("--end-date", help="Inclusive publication end date; defaults to today."),
+    ] = None,
+    resume_run: Annotated[Path | None, typer.Option("--resume-run")] = None,
+    limit: Annotated[
+        int | None,
+        typer.Option(
+            "--limit",
+            min=1,
+            help=(
+                "Process only the first N chronological FormalItems. Produces an incomplete "
+                "technical run that fetch-pubmed refuses."
+            ),
+        ),
+    ] = None,
+) -> None:
+    """Generate GPT semantic search blocks and deterministic PubMed queries."""
+    settings = _load_settings(env_file)
+    if not settings.worker_id or settings.openai_api_key is None:
+        typer.echo("Worker-ID oder OPENAI_API_KEY fehlt.", err=True)
+        raise typer.Exit(2)
+    try:
+        parsed_start = date.fromisoformat(start_date)
+        parsed_end = date.fromisoformat(end_date) if end_date else date.today()
+        run_dir = generate_searches(
+            input_run=input_run,
+            output_root=output_root,
+            worker_id=settings.worker_id,
+            api_key=settings.openai_api_key,
+            start_date=parsed_start,
+            end_date=parsed_end,
+            resume_run=resume_run,
+            limit=limit,
+        )
+    except (ValueError, FileExistsError, RuntimeError) as exc:
+        typer.echo(f"Search-Generierung fehlgeschlagen: {exc}", err=True)
+        raise typer.Exit(4) from exc
+    typer.echo(f"Search-Run-Verzeichnis: {run_dir}")
+
+
+@app.command("fetch-pubmed")
+def fetch_pubmed_command(
+    input_run: Annotated[Path, typer.Option("--input-run")],
+    output_root: Annotated[Path, typer.Option("--output-root")],
+    env_file: EnvFileOption = None,
+    start_date: Annotated[
+        str | None,
+        typer.Option("--start-date", help="Assert the immutable query start date (YYYY-MM-DD)."),
+    ] = None,
+    end_date: Annotated[
+        str | None,
+        typer.Option("--end-date", help="Assert the immutable query end date (YYYY-MM-DD)."),
+    ] = None,
+    resume_run: Annotated[Path | None, typer.Option("--resume-run")] = None,
+    limit: Annotated[
+        int | None,
+        typer.Option(
+            "--limit",
+            min=1,
+            help=(
+                "Fetch at most N PMIDs per query. Produces a technical_limited run; its "
+                "fingerprint cannot resume as a complete run."
+            ),
+        ),
+    ] = None,
+) -> None:
+    """Fetch existing PubMed queries through official NCBI E-Utilities."""
+    settings = _load_settings(env_file)
+    if not settings.worker_id or settings.ncbi_email is None:
+        typer.echo("Worker-ID oder NCBI_EMAIL fehlt.", err=True)
+        raise typer.Exit(2)
+    try:
+        run_dir = fetch_pubmed(
+            input_run=input_run,
+            output_root=output_root,
+            worker_id=settings.worker_id,
+            email=settings.ncbi_email,
+            api_key=settings.ncbi_api_key,
+            tool=settings.ncbi_tool or "aisurgeon",
+            resume_run=resume_run,
+            limit=limit,
+            expected_start_date=start_date,
+            expected_end_date=end_date,
+        )
+    except (ValueError, FileExistsError, RuntimeError) as exc:
+        typer.echo(f"PubMed-Abruf fehlgeschlagen: {exc}", err=True)
+        raise typer.Exit(4) from exc
+    typer.echo(f"PubMed-Fetch-Run-Verzeichnis: {run_dir}")
 
 
 if __name__ == "__main__":

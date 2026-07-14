@@ -1,0 +1,400 @@
+import json
+from datetime import date
+from pathlib import Path
+
+import pytest
+from pydantic import SecretStr
+
+from aisurgeon.search.pubmed import ncbi
+from aisurgeon.search.pubmed.generation import generate_searches, normalize_search_plan
+from aisurgeon.search.pubmed.models import SearchPlanDraft, SearchUnitDraft
+from aisurgeon.search.pubmed.ncbi import HttpResponse, NcbiClient, fetch_pubmed, parse_pubmed_xml
+from aisurgeon.search.pubmed.query import build_query, validate_query_core
+
+
+def query_record(query_id: str, unit_id: str, formal_id: str, core: str) -> dict:
+    date_filter = '("2023/01/01"[Date - Publication] : "2026/07/14"[Date - Publication])'
+    humans = "NOT (animals[mh] NOT humans[mh])"
+    evidence = (
+        '("Randomized Controlled Trial"[pt] OR "Meta-Analysis"[pt] OR "Systematic Review"[pt]'
+        ' OR "Clinical Trial"[pt] OR "Observational Study"[pt] OR "Comparative Study"[pt]'
+        ' OR "Evaluation Study"[pt] OR "Validation Study"[pt])'
+    )
+    exclusion = 'NOT ("Practice Guideline"[pt] OR "Guideline"[pt])'
+    return {
+        "schema_version": "pubmed_query_v1",
+        "source_id": "SRC",
+        "query_id": query_id,
+        "search_unit_id": unit_id,
+        "linked_formal_item_ids": [formal_id],
+        "query_core": core,
+        "date_filter": date_filter,
+        "humans_filter": humans,
+        "evidence_type_filter": evidence,
+        "exclusion_filter": exclusion,
+        "final_pubmed_query": f"({core}) AND {date_filter} AND {humans} AND {evidence} {exclusion}",
+        "start_date": "2023-01-01",
+        "end_date": "2026-07-14",
+        "query_version": "pubmed_query_builder_v2",
+        "prompt_version": "v1",
+        "prompt_hash": "h",
+        "model_id": "gpt-5.5",
+        "model_configuration": {},
+        "model_configuration_hash": "m",
+        "review_required": False,
+        "review_notes": [],
+    }
+
+
+def item(number: str, family: str) -> dict:
+    return {
+        "formal_item_id": f"SRC_{number}",
+        "original_number": number,
+        "normalized_item_family": family,
+        "exact_original_text": f"Original {number}",
+    }
+
+
+def draft(ids: list[str], *, relevance="search_relevant") -> SearchUnitDraft:
+    return SearchUnitDraft(
+        section_path=["Therapie"],
+        topic_de="Thema",
+        topic_en="Topic",
+        linked_formal_item_ids=ids,
+        search_relevance=relevance,
+        exclusion_reason="Administrative item" if relevance != "search_relevant" else None,
+        clinical_question="Question",
+        query_core='("GERD"[Title/Abstract] OR "Gastroesophageal Reflux"[Mesh])',
+    )
+
+
+def test_all_formal_families_are_equal_and_units_can_group_items() -> None:
+    records = [
+        item("1", "recommendation"),
+        item("2", "statement"),
+        item("3", "consensus_statement"),
+        item("4", "expert_consensus"),
+    ]
+    units, coverage = normalize_search_plan(
+        SearchPlanDraft(search_units=[draft([r["formal_item_id"] for r in records])]),
+        records,
+        "SRC",
+    )
+    assert units[0].linked_formal_item_families == [r["normalized_item_family"] for r in records]
+    assert len(coverage) == 4 and all(row.linked_search_unit_ids for row in coverage)
+
+
+def test_coverage_hard_fails_and_explicit_exclusion_is_retained() -> None:
+    records = [item("1", "statement"), item("2", "other_formal_item")]
+    with pytest.raises(ValueError, match="coverage incomplete"):
+        normalize_search_plan(SearchPlanDraft(search_units=[draft(["SRC_1"])]), records, "SRC")
+    units, coverage = normalize_search_plan(
+        SearchPlanDraft(
+            search_units=[draft(["SRC_1"]), draft(["SRC_2"], relevance="not_search_relevant")]
+        ),
+        records,
+        "SRC",
+    )
+    assert units[1].exclusion_reason and coverage[1].search_relevance == "not_search_relevant"
+
+
+def test_ids_are_deterministic_and_exact_text_is_from_canonical_input() -> None:
+    records = [item("1", "statement")]
+    plan = SearchPlanDraft(search_units=[draft(["SRC_1"])])
+    first = normalize_search_plan(plan, records, "SRC")[0][0]
+    second = normalize_search_plan(plan, records, "SRC")[0][0]
+    assert first.search_unit_id == second.search_unit_id
+    assert first.exact_formal_item_texts == ["Original 1"]
+
+
+def test_python_adds_technical_filters() -> None:
+    unit = normalize_search_plan(
+        SearchPlanDraft(search_units=[draft(["SRC_1"])]), [item("1", "recommendation")], "SRC"
+    )[0][0]
+    query = build_query(
+        unit,
+        start_date=date(2023, 1, 1),
+        end_date=date(2026, 7, 14),
+        prompt_version="v1",
+        prompt_hash="h",
+        model_config={"model_id": "gpt-5.5"},
+        model_config_hash="m",
+    )
+    assert "2023/01/01" in query.date_filter
+    assert "animals[mh] NOT humans[mh]" in query.humans_filter
+    assert "Systematic Review" in query.evidence_type_filter
+    assert "Practice Guideline" in query.exclusion_filter
+
+
+@pytest.mark.parametrize("value", ["(GERD OR reflux", "()", "AND GERD", "GERD OR AND reflux"])
+def test_boolean_validation(value: str) -> None:
+    assert validate_query_core(value)
+
+
+def test_esearch_paginates_retries_and_never_places_key_in_cache(tmp_path: Path) -> None:
+    calls = []
+
+    def transport(url, params, timeout):
+        calls.append(dict(params))
+        if len(calls) == 1:
+            return HttpResponse(429, b"", {"Retry-After": "0"})
+        start = int(params["retstart"])
+        ids = [str(n) for n in range(start + 1, min(3, start + 2) + 1)] if start < 3 else []
+        return HttpResponse(
+            200, json.dumps({"esearchresult": {"count": "3", "idlist": ids}}).encode()
+        )
+
+    client = NcbiClient(
+        email=SecretStr("owner@example.test"),
+        api_key=SecretStr("top-secret-key"),
+        tool="aisurgeon-tests",
+        cache_dir=tmp_path,
+        transport=transport,
+        sleep=lambda _: None,
+    )
+    assert client.esearch("GERD", page_size=2) == ["1", "2", "3"]
+    assert "top-secret-key" not in "".join(path.name for path in tmp_path.iterdir())
+    assert len(calls) == 3
+
+
+def test_permanent_error_is_not_retried(tmp_path: Path) -> None:
+    calls = 0
+
+    def transport(*args):
+        nonlocal calls
+        calls += 1
+        return HttpResponse(400, b"bad")
+
+    client = NcbiClient(
+        email=SecretStr("x@y.test"),
+        api_key=None,
+        tool="test",
+        cache_dir=tmp_path,
+        transport=transport,
+        sleep=lambda _: None,
+    )
+    with pytest.raises(RuntimeError, match="permanent"):
+        client.esearch("GERD")
+    assert calls == 1
+
+
+def test_xml_parser_combines_abstract_parts_collective_authors_and_missing_abstract() -> None:
+    xml = b"""<PubmedArticleSet>
+    <PubmedArticle><MedlineCitation><PMID>1</PMID><Article>
+    <ArticleTitle>Title</ArticleTitle><Abstract>
+    <AbstractText Label="BACKGROUND">First</AbstractText>
+    <AbstractText>Second</AbstractText></Abstract>
+    <AuthorList><Author><CollectiveName>Study Group</CollectiveName></Author></AuthorList>
+    <Journal><Title>Journal</Title><JournalIssue><PubDate><Year>2025</Year>
+    <Month>Jan</Month></PubDate></JournalIssue></Journal>
+    </Article></MedlineCitation></PubmedArticle>
+    <PubmedArticle><MedlineCitation><PMID>2</PMID><Article>
+    <ArticleTitle>No abstract</ArticleTitle></Article></MedlineCitation></PubmedArticle>
+    </PubmedArticleSet>"""
+    articles = parse_pubmed_xml(xml, fetched_at="2026-07-14T00:00:00Z")
+    assert articles[0].abstract == "BACKGROUND: First\nSecond"
+    assert articles[0].authors == ["Study Group"]
+    assert articles[1].has_abstract is False
+
+
+def test_fetch_deduplicates_pmids_and_preserves_many_to_many_provenance(tmp_path: Path) -> None:
+    search_run = tmp_path / "search"
+    search_run.mkdir()
+    queries = [query_record("Q1", "U1", "F1", "one"), query_record("Q2", "U2", "F2", "two")]
+    (search_run / "pubmed_queries.jsonl").write_text(
+        "\n".join(json.dumps(value) for value in queries) + "\n", encoding="utf-8"
+    )
+    (search_run / "search_manifest.json").write_text(
+        json.dumps({"run_mode": "complete"}), encoding="utf-8"
+    )
+
+    class FakeClient:
+        def esearch(self, query, limit=None):
+            return ["1"] if "(one)" in query else ["1", "2"]
+
+        def efetch(self, pmids):
+            records = "".join(
+                f"<PubmedArticle><MedlineCitation><PMID>{pmid}</PMID><Article>"
+                f"<ArticleTitle>T{pmid}</ArticleTitle></Article></MedlineCitation></PubmedArticle>"
+                for pmid in pmids
+            )
+            return f"<PubmedArticleSet>{records}</PubmedArticleSet>".encode()
+
+    def factory(**kwargs):
+        return FakeClient()
+
+    run = fetch_pubmed(
+        input_run=search_run,
+        output_root=tmp_path,
+        worker_id="worker",
+        email=SecretStr("owner@example.test"),
+        api_key=SecretStr("secret-never-output"),
+        client_factory=factory,
+    )
+    articles = [
+        json.loads(line) for line in (run / "pubmed_articles.jsonl").read_text().splitlines()
+    ]
+    assert [article["pmid"] for article in articles] == ["1", "2"]
+    assert articles[0]["query_ids"] == ["Q1", "Q2"]
+    assert articles[0]["linked_formal_item_ids"] == ["F1", "F2"]
+    assert "secret-never-output" not in "".join(
+        path.read_text(errors="ignore") for path in run.rglob("*") if path.is_file()
+    )
+
+
+def test_fetch_resume_requires_identical_fingerprint(tmp_path: Path) -> None:
+    search_run = tmp_path / "search"
+    search_run.mkdir()
+    query_path = search_run / "pubmed_queries.jsonl"
+    query_path.write_text(
+        json.dumps(query_record("Q1", "U1", "F1", "one")) + "\n", encoding="utf-8"
+    )
+    (search_run / "search_manifest.json").write_text(
+        json.dumps({"run_mode": "complete"}), encoding="utf-8"
+    )
+    resume = tmp_path / "resume"
+    resume.mkdir()
+    (resume / "checkpoint_fingerprint.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(ValueError, match="fingerprint"):
+        fetch_pubmed(
+            input_run=search_run,
+            output_root=tmp_path,
+            worker_id="worker",
+            email=SecretStr("owner@example.test"),
+            api_key=None,
+            resume_run=resume,
+        )
+
+
+def test_search_generation_is_mocked_resumable_and_covers_every_item(tmp_path: Path) -> None:
+    extraction = tmp_path / "extraction"
+    extraction.mkdir()
+    formal = [
+        {**item("1", "recommendation"), "source_id": "SRC"},
+        {**item("2", "statement"), "source_id": "SRC"},
+    ]
+    (extraction / "formal_items.jsonl").write_text(
+        "\n".join(json.dumps(value) for value in formal) + "\n", encoding="utf-8"
+    )
+    (extraction / "comments.jsonl").write_text("", encoding="utf-8")
+    (extraction / "document_map.validated.json").write_text("{}", encoding="utf-8")
+    (extraction / "extraction_manifest.json").write_text(
+        json.dumps({"status": "completed_with_review", "source_id": "SRC"}), encoding="utf-8"
+    )
+    calls = 0
+
+    class FakeOpenAI:
+        def create(self, prompt, payload):
+            nonlocal calls
+            calls += 1
+            return SearchPlanDraft(search_units=[draft(["SRC_1", "SRC_2"])]).model_dump(mode="json")
+
+    def factory(api_key, config):
+        return FakeOpenAI()
+
+    run = generate_searches(
+        input_run=extraction,
+        output_root=tmp_path,
+        worker_id="worker",
+        api_key=SecretStr("dummy-secret-never-output"),
+        start_date=date(2023, 1, 1),
+        end_date=date(2026, 7, 14),
+        client_factory=factory,
+    )
+    resumed = generate_searches(
+        input_run=extraction,
+        output_root=tmp_path,
+        worker_id="worker",
+        api_key=SecretStr("different-dummy-secret"),
+        start_date=date(2023, 1, 1),
+        end_date=date(2026, 7, 14),
+        resume_run=run,
+        client_factory=factory,
+    )
+    assert resumed == run and calls == 1
+    assert len((run / "formal_item_search_coverage.jsonl").read_text().splitlines()) == 2
+    manifest = (run / "search_manifest.json").read_text()
+    assert "dummy-secret-never-output" not in manifest
+    with pytest.raises(ValueError, match="fingerprint"):
+        generate_searches(
+            input_run=extraction,
+            output_root=tmp_path,
+            worker_id="worker",
+            api_key=SecretStr("dummy"),
+            start_date=date(2024, 1, 1),
+            end_date=date(2026, 7, 14),
+            resume_run=run,
+            client_factory=factory,
+        )
+
+
+def test_limited_search_is_marked_incomplete_and_cannot_be_fetched(tmp_path: Path) -> None:
+    extraction = tmp_path / "extraction"
+    extraction.mkdir()
+    formal = [
+        {**item("1", "recommendation"), "source_id": "SRC"},
+        {**item("2", "statement"), "source_id": "SRC"},
+    ]
+    (extraction / "formal_items.jsonl").write_text(
+        "\n".join(json.dumps(value) for value in formal) + "\n", encoding="utf-8"
+    )
+    (extraction / "comments.jsonl").write_text("", encoding="utf-8")
+    (extraction / "document_map.validated.json").write_text("{}", encoding="utf-8")
+    (extraction / "extraction_manifest.json").write_text(
+        json.dumps({"status": "completed_with_review", "source_id": "SRC"}), encoding="utf-8"
+    )
+
+    class FakeOpenAI:
+        def create(self, prompt, payload):
+            return SearchPlanDraft(search_units=[draft(["SRC_1"])]).model_dump(mode="json")
+
+    run = generate_searches(
+        input_run=extraction,
+        output_root=tmp_path,
+        worker_id="worker",
+        api_key=SecretStr("dummy"),
+        start_date=date(2023, 1, 1),
+        end_date=date(2026, 7, 14),
+        limit=1,
+        client_factory=lambda api_key, config: FakeOpenAI(),
+    )
+    manifest = json.loads((run / "search_manifest.json").read_text())
+    assert manifest["status"] == "technical_limited"
+    assert manifest["coverage_complete"] is False
+    with pytest.raises(ValueError, match="limited Search run"):
+        fetch_pubmed(
+            input_run=run,
+            output_root=tmp_path,
+            worker_id="worker",
+            email=SecretStr("owner@example.test"),
+            api_key=None,
+        )
+
+
+def test_transport_uses_post_for_long_requests(monkeypatch) -> None:
+    captured = {}
+
+    class Response:
+        def __init__(self):
+            self.status = 200
+            self.headers = {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return b"ok"
+
+    def urlopen(request, timeout):
+        captured["method"] = request.get_method()
+        captured["url"] = request.full_url
+        return Response()
+
+    monkeypatch.setattr(ncbi.urllib.request, "urlopen", urlopen)
+    ncbi._transport("https://example.test", {"term": "x" * 2000}, 1)
+    assert captured == {"method": "POST", "url": "https://example.test"}
+    ncbi._transport("https://example.test", {"term": "short", "email": "owner@example.test"}, 1)
+    assert captured == {"method": "POST", "url": "https://example.test"}

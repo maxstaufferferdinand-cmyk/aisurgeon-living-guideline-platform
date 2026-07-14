@@ -61,6 +61,10 @@ class Settings(BaseSettings):
         default=None,
         validation_alias=AliasChoices("NCBI_EMAIL", "ncbi_email"),
     )
+    ncbi_tool: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("NCBI_TOOL", "ncbi_tool"),
+    )
 
     @model_validator(mode="after")
     def derive_output_paths(self) -> "Settings":

@@ -47,6 +47,22 @@ def test_config_check_reports_only_credential_state(tmp_path: Path) -> None:
         assert fragment not in result.output
 
 
+def test_explicit_relative_dotenv_path_works(tmp_path: Path, monkeypatch) -> None:
+    data_root = tmp_path / "root"
+    pdf_dir = tmp_path / "pdfs"
+    for directory in (
+        data_root,
+        pdf_dir,
+        *(data_root / name for name in ("runs", "cache", "exports", "logs")),
+    ):
+        directory.mkdir(parents=True, exist_ok=True)
+    _write_env(tmp_path / ".env", data_root, pdf_dir)
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["config-check", "--env-file", ".env"])
+    assert result.exit_code == 0
+    assert "Lokale Grundkonfiguration ist gültig" in result.output
+
+
 def test_config_check_detects_missing_worker_id(tmp_path: Path) -> None:
     env_file = tmp_path / "missing-worker.env"
     env_file.write_text(f"AISURGEON_DATA_ROOT={tmp_path}\n", encoding="utf-8")
