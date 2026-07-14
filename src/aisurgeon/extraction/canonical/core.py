@@ -66,18 +66,59 @@ def _short_hash(*values: str) -> str:
     return hashlib.sha256("\x1f".join(values).encode()).hexdigest()[:12]
 
 
+def normalize_item_family(item_type_raw: str | None, item_type: str) -> str:
+    """Normalize source-native labels without changing their raw representation."""
+    raw = (item_type_raw or "").strip().casefold()
+    compact = re.sub(r"[^a-z0-9äöüß]+", " ", raw).strip()
+    if (
+        compact == "ek"
+        or compact.startswith("ek ")
+        or "expertenkonsens" in compact
+        or "expert consensus" in compact
+    ):
+        return "expert_consensus"
+    if (
+        "konsensusstatement" in compact
+        or "konsensbasiertes statement" in compact
+        or "konsensbasiert statement" in compact
+        or "consensus statement" in compact
+        or "consensus based statement" in compact
+    ):
+        return "consensus_statement"
+    if "statement" in compact or "aussage" in compact:
+        return "statement"
+    if "empfehlung" in compact or "recommendation" in compact:
+        return "recommendation"
+    if not compact and item_type in {"recommendation", "statement"}:
+        return item_type
+    return "other_formal_item"
+
+
 def assign_formal_item_ids(items: list[FormalItem]) -> None:
     counters: dict[str, int] = {}
-    labels = {"recommendation": "REC", "statement": "STMT", "other_formal_item": "FORMAL"}
-    for item in sorted(items, key=lambda value: (value.page_start, value.page_end)):
-        label = labels[item.item_type]
+    labels = {
+        "recommendation": "REC",
+        "statement": "STMT",
+        "consensus_statement": "CSTMT",
+        "expert_consensus": "EK",
+        "other_formal_item": "FORMAL",
+    }
+    for item in items:
+        family = item.normalized_item_family or normalize_item_family(
+            item.item_type_raw, item.item_type
+        )
+        item.normalized_item_family = family
+        label = labels[family]
         number = _normalized_number(item.original_number)
         if number:
-            item.item_id = f"{item.source_id}_{label}_{number}"
+            item.formal_item_id = f"{item.source_id}_{label}_{number}"
         else:
             counters[label] = counters.get(label, 0) + 1
-            digest = _short_hash(item.item_type, item.exact_original_text, str(item.page_start))
-            item.item_id = f"{item.source_id}_{label}_{counters[label]:04d}_{digest}"
+            digest = _short_hash(family, item.exact_original_text, str(item.page_start))
+            item.formal_item_id = (
+                f"{item.source_id}_{label}_{counters[label]:04d}_{digest}"
+            )
+        item.item_id = item.formal_item_id
 
 
 def assign_object_id(source_id: str, kind: str, *parts: str) -> str:
@@ -120,20 +161,29 @@ def make_finding(
 
 def merge_formal_items(items: list[FormalItem]) -> tuple[list[FormalItem], list[ReviewFinding]]:
     """Deduplicate exact overlap copies and retain conflicts with an audit finding."""
-    assign_formal_item_ids(items)
     merged: list[FormalItem] = []
     findings: list[ReviewFinding] = []
-    exact_seen: set[tuple[str, str, str | None, str, int, int]] = set()
+    exact_seen: set[tuple[str, str, str | None, str]] = set()
     number_text: dict[tuple[str, str, str | None], str] = {}
-    for item in items:
+    # Pipeline batches and objects arrive in primary-window/source order. Preserve that
+    # order because printed or model-reported page labels can differ from physical pages.
+    ordered = enumerate(items)
+    for _, item in ordered:
+        item.normalized_item_family = normalize_item_family(item.item_type_raw, item.item_type)
+        known_other = (item.item_type_raw or "").casefold()
+        if item.normalized_item_family == "other_formal_item" and not any(
+            label in known_other
+            for label in ("good clinical practice", "gute klinische praxis", "gcp")
+        ):
+            item.review_required = True
+            if "unknown_formal_item_type" not in item.review_reasons:
+                item.review_reasons.append("unknown_formal_item_type")
         text_hash = _short_hash(item.exact_original_text)
         key = (
             item.source_id,
-            item.item_type,
+            item.normalized_item_family,
             _normalized_number(item.original_number),
             text_hash,
-            item.page_start,
-            item.page_end,
         )
         if key in exact_seen:
             findings.append(
@@ -144,7 +194,7 @@ def merge_formal_items(items: list[FormalItem]) -> tuple[list[FormalItem], list[
                         "Identische Überlappungsdublette deterministisch zusammengeführt."
                     ),
                     object_type="formal_item",
-                    object_id=item.item_id,
+                    object_id=item.formal_item_id,
                     original_number=item.original_number,
                     page_start=item.page_start,
                     page_end=item.page_end,
@@ -166,7 +216,7 @@ def merge_formal_items(items: list[FormalItem]) -> tuple[list[FormalItem], list[
                         "Gleiche formale Nummer mit abweichendem Originaltext; beide erhalten."
                     ),
                     object_type="formal_item",
-                    object_id=item.item_id,
+                    object_id=item.formal_item_id,
                     original_number=item.original_number,
                     page_start=item.page_start,
                     page_end=item.page_end,
@@ -174,6 +224,9 @@ def merge_formal_items(items: list[FormalItem]) -> tuple[list[FormalItem], list[
             )
         number_text[identity] = text_hash
         merged.append(item)
+    assign_formal_item_ids(merged)
+    for sequence_number, item in enumerate(merged, start=1):
+        item.sequence_number = sequence_number
     return merged, findings
 
 
@@ -197,8 +250,9 @@ def link_comments(comments: list[Comment], items: list[FormalItem]) -> list[Revi
         if not candidates:
             candidates = [item for item in items if item.page_end <= comment.page_start]
             candidates = sorted(candidates, key=lambda item: item.page_end, reverse=True)[:1]
-        if len(candidates) == 1 and candidates[0].item_id:
-            comment.linked_item_ids = [candidates[0].item_id]
+        if len(candidates) == 1 and candidates[0].formal_item_id:
+            comment.linked_formal_item_ids = [candidates[0].formal_item_id]
+            comment.linked_item_ids = [candidates[0].formal_item_id]
             candidates[0].linked_comment_ids.append(comment.comment_id)
         else:
             comment.review_required = True
@@ -251,7 +305,7 @@ def link_references(
             if missing:
                 obj.review_required = True
                 obj.review_reasons.append("reference_unresolved")
-                object_id = obj.item_id if isinstance(obj, FormalItem) else obj.comment_id
+                object_id = obj.formal_item_id if isinstance(obj, FormalItem) else obj.comment_id
                 for number in missing:
                     unresolved.append(
                         UnresolvedLink(

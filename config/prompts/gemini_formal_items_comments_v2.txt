@@ -1,0 +1,123 @@
+prompt_version = gemini_formal_items_comments_v2
+
+Read the specified original PDF pages visually and structurally. When a
+multi-column layout is present, follow the correct reading order. Never
+interleave text from different columns, boxes, sections, or formal items.
+
+Use physical PDF pages and the source-native document structure. Preserve
+the original chapter and section context needed to place every extracted
+object in its correct chronological position.
+
+Treat “Was ist neu?”, “Änderungen”, “Summary”, “Kurzfassung”, executive
+summaries, change logs, overview tables, and the table of contents as
+non-canonical summary regions.
+
+These regions do not belong to the chronological formal-item backbone.
+
+Do not create canonical FormalItem objects from these regions and do not
+use their wording as a substitute for the complete formal item in the
+clinical main body. They may only be used as contextual cross-references
+or to flag a possible update.
+
+Extract every formal guideline item and every clinically relevant original
+text segment from the specified clinical-main-body pages.
+
+All source-native formal item types are equally important and belong to one
+shared chronological formal-item backbone. This includes, when present:
+
+- recommendations,
+- evidence-based recommendations,
+- consensus-based recommendations,
+- statements,
+- evidence-based statements,
+- consensus-based statements,
+- consensus statements,
+- expert-consensus items,
+- EK or expert-consensus recommendations,
+- good-clinical-practice items,
+- and any other formally labelled item type used by the source.
+
+Do not prioritize recommendations over statements. Do not omit statements,
+consensus statements, expert-consensus items, or other formally labelled
+items.
+
+For every formal item, preserve:
+
+- the exact source-native item type or label,
+- the exact original item number,
+- the exact topic or short title when present,
+- the complete exact original text,
+- the original chapter and section context,
+- recommendation grade,
+- evidence level,
+- consensus value,
+- status and year,
+- punctuation,
+- bullet and numbered-list structure,
+- cross-references to tables, figures, algorithms, or other items,
+- and inline reference numbers exactly when present.
+
+Return exact original text. Do not summarize, paraphrase, translate, correct
+spelling, modernize terminology, or add content.
+
+Do not merge two separate formal items into one object. Do not split one
+formal item into separate objects merely because it crosses a column,
+page, or text box.
+
+When a formal item continues onto a following page or context page, include
+the complete continuation in the same object.
+
+Wrapped lines within the same source object may be joined for readability,
+but words, punctuation, list structure, and meaning must remain unchanged.
+Do not retain artificial PDF line-break hyphenation when it merely splits
+one word across two printed lines. Preserve genuine source hyphens.
+
+Extract every associated comment, rationale, background, explanation, or
+supporting text, including sections labelled for example:
+
+- Kommentar,
+- Begründung,
+- Hintergrund,
+- Erläuterung,
+- Rationale,
+- or another source-native equivalent.
+
+Link each comment or rationale to the corresponding formal item whenever
+the relationship is supported by the source. Comments and rationales may
+belong to recommendations, statements, consensus statements, expert-
+consensus items, or any other formal item type.
+
+A comment may span several pages. Preserve the complete exact original
+comment text and its page range.
+
+If a comment-to-item relationship is uncertain, preserve the comment,
+leave the definitive link unresolved, and mark it for review. Do not discard
+the text.
+
+Classify extracted content as:
+
+- FormalItem,
+- Comment,
+- or ClinicalContextBlock.
+
+Preserve every clinically relevant original text segment that cannot be
+assigned confidently to a formal item or comment as a ClinicalContextBlock.
+Do not discard clinically relevant source text solely because its exact
+relationship is uncertain.
+
+Return an object as new only when the formal heading or beginning of that
+object lies in the supplied primary page range. Context pages are used only
+to complete an object, understand its structure, or establish links. Do not
+create duplicate objects from context pages.
+
+Mark small uncertainties, incomplete metadata, unclear boundaries, or
+uncertain links for review, but still return all usable source-bound
+objects.
+
+Do not generate stable final IDs. Do not infer missing recommendation
+grades, evidence levels, consensus values, years, labels, references, or
+other metadata. Use null or an empty list when information is not present
+or cannot be determined reliably.
+
+Output only data conforming to the supplied structured schema.
+

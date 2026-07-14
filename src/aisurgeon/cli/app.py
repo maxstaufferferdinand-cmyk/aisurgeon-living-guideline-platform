@@ -290,6 +290,7 @@ def extract_guideline(
     overlap_pages: Annotated[int, typer.Option("--overlap-pages", min=0)] = 1,
     allow_dirty: Annotated[bool, typer.Option("--allow-dirty")] = False,
     keep_remote_file: Annotated[bool, typer.Option("--keep-remote-file")] = False,
+    resume_run: Annotated[Path | None, typer.Option("--resume-run")] = None,
     dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
 ) -> None:
     """Plan or run canonical native extraction against one remote PDF."""
@@ -322,6 +323,7 @@ def extract_guideline(
                 overlap_pages=overlap_pages,
                 allow_dirty=allow_dirty,
                 keep_remote_file=keep_remote_file,
+                resume_run_dir=resume_run,
             )
             job_count = -1
     except (GeminiConfigurationError, PdfRegistrationError, ValueError, FileExistsError) as exc:

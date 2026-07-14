@@ -1,0 +1,530 @@
+{
+  "$defs": {
+    "ClinicalContextBlock": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "default": "canonical_extraction_v2",
+          "enum": [
+            "canonical_extraction_v1",
+            "canonical_extraction_v2"
+          ],
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "source_id": {
+          "minLength": 1,
+          "title": "Source Id",
+          "type": "string"
+        },
+        "page_start": {
+          "minimum": 1,
+          "title": "Page Start",
+          "type": "integer"
+        },
+        "page_end": {
+          "minimum": 1,
+          "title": "Page End",
+          "type": "integer"
+        },
+        "extraction_confidence": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Extraction Confidence",
+          "type": "number"
+        },
+        "review_required": {
+          "default": false,
+          "title": "Review Required",
+          "type": "boolean"
+        },
+        "review_reasons": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Review Reasons",
+          "type": "array"
+        },
+        "context_block_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Context Block Id"
+        },
+        "exact_original_text": {
+          "minLength": 1,
+          "title": "Exact Original Text",
+          "type": "string"
+        },
+        "chapter_path_raw": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Chapter Path Raw",
+          "type": "array"
+        },
+        "possible_related_original_numbers": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Possible Related Original Numbers",
+          "type": "array"
+        },
+        "reason_unassigned": {
+          "minLength": 1,
+          "title": "Reason Unassigned",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_id",
+        "page_start",
+        "page_end",
+        "extraction_confidence",
+        "exact_original_text",
+        "reason_unassigned"
+      ],
+      "title": "ClinicalContextBlock",
+      "type": "object"
+    },
+    "Comment": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "default": "canonical_extraction_v2",
+          "enum": [
+            "canonical_extraction_v1",
+            "canonical_extraction_v2"
+          ],
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "source_id": {
+          "minLength": 1,
+          "title": "Source Id",
+          "type": "string"
+        },
+        "page_start": {
+          "minimum": 1,
+          "title": "Page Start",
+          "type": "integer"
+        },
+        "page_end": {
+          "minimum": 1,
+          "title": "Page End",
+          "type": "integer"
+        },
+        "extraction_confidence": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Extraction Confidence",
+          "type": "number"
+        },
+        "review_required": {
+          "default": false,
+          "title": "Review Required",
+          "type": "boolean"
+        },
+        "review_reasons": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Review Reasons",
+          "type": "array"
+        },
+        "extraction_batch_id": {
+          "minLength": 1,
+          "title": "Extraction Batch Id",
+          "type": "string"
+        },
+        "comment_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Comment Id"
+        },
+        "comment_type_raw": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Comment Type Raw"
+        },
+        "exact_original_text": {
+          "minLength": 1,
+          "title": "Exact Original Text",
+          "type": "string"
+        },
+        "related_original_number": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Related Original Number"
+        },
+        "related_formal_item_type_raw": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Related Formal Item Type Raw"
+        },
+        "linked_item_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Linked Item Ids",
+          "type": "array"
+        },
+        "linked_formal_item_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Linked Formal Item Ids",
+          "type": "array"
+        },
+        "inline_reference_numbers": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Inline Reference Numbers",
+          "type": "array"
+        },
+        "unresolved_reference_numbers": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Unresolved Reference Numbers",
+          "type": "array"
+        },
+        "chapter_path_raw": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Chapter Path Raw",
+          "type": "array"
+        }
+      },
+      "required": [
+        "source_id",
+        "page_start",
+        "page_end",
+        "extraction_confidence",
+        "extraction_batch_id",
+        "exact_original_text"
+      ],
+      "title": "Comment",
+      "type": "object"
+    },
+    "FormalItem": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "default": "canonical_extraction_v2",
+          "enum": [
+            "canonical_extraction_v1",
+            "canonical_extraction_v2"
+          ],
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "source_id": {
+          "minLength": 1,
+          "title": "Source Id",
+          "type": "string"
+        },
+        "page_start": {
+          "minimum": 1,
+          "title": "Page Start",
+          "type": "integer"
+        },
+        "page_end": {
+          "minimum": 1,
+          "title": "Page End",
+          "type": "integer"
+        },
+        "extraction_confidence": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Extraction Confidence",
+          "type": "number"
+        },
+        "review_required": {
+          "default": false,
+          "title": "Review Required",
+          "type": "boolean"
+        },
+        "review_reasons": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Review Reasons",
+          "type": "array"
+        },
+        "extraction_batch_id": {
+          "minLength": 1,
+          "title": "Extraction Batch Id",
+          "type": "string"
+        },
+        "item_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Item Id"
+        },
+        "formal_item_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Formal Item Id"
+        },
+        "sequence_number": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sequence Number"
+        },
+        "item_type": {
+          "enum": [
+            "recommendation",
+            "statement",
+            "other_formal_item"
+          ],
+          "title": "Item Type",
+          "type": "string"
+        },
+        "item_type_raw": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Item Type Raw"
+        },
+        "normalized_item_family": {
+          "anyOf": [
+            {
+              "enum": [
+                "recommendation",
+                "statement",
+                "consensus_statement",
+                "expert_consensus",
+                "other_formal_item"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Normalized Item Family"
+        },
+        "original_number": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Original Number"
+        },
+        "topic_or_short_title_raw": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Topic Or Short Title Raw"
+        },
+        "exact_original_text": {
+          "minLength": 1,
+          "title": "Exact Original Text",
+          "type": "string"
+        },
+        "chapter_path_raw": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Chapter Path Raw",
+          "type": "array"
+        },
+        "recommendation_grade_raw": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Recommendation Grade Raw"
+        },
+        "evidence_level_raw": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Evidence Level Raw"
+        },
+        "consensus_raw": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Consensus Raw"
+        },
+        "status_raw": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Status Raw"
+        },
+        "year_raw": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Year Raw"
+        },
+        "inline_reference_numbers": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Inline Reference Numbers",
+          "type": "array"
+        },
+        "linked_comment_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Linked Comment Ids",
+          "type": "array"
+        },
+        "unresolved_reference_numbers": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Unresolved Reference Numbers",
+          "type": "array"
+        }
+      },
+      "required": [
+        "source_id",
+        "page_start",
+        "page_end",
+        "extraction_confidence",
+        "extraction_batch_id",
+        "item_type",
+        "exact_original_text"
+      ],
+      "title": "FormalItem",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "formal_items": {
+      "items": {
+        "$ref": "#/$defs/FormalItem"
+      },
+      "title": "Formal Items",
+      "type": "array"
+    },
+    "comments": {
+      "items": {
+        "$ref": "#/$defs/Comment"
+      },
+      "title": "Comments",
+      "type": "array"
+    },
+    "clinical_context_blocks": {
+      "items": {
+        "$ref": "#/$defs/ClinicalContextBlock"
+      },
+      "title": "Clinical Context Blocks",
+      "type": "array"
+    }
+  },
+  "title": "ExtractionBatch",
+  "type": "object"
+}

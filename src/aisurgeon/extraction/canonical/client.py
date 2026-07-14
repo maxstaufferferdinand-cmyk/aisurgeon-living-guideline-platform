@@ -7,6 +7,7 @@ from typing import Any, TypeVar
 
 from pydantic import BaseModel, SecretStr, ValidationError
 
+from aisurgeon.extraction.canonical.models import SCHEMA_VERSION
 from aisurgeon.extraction.gemini.client import GeminiDocumentMapClient
 from aisurgeon.extraction.gemini.errors import GeminiResponseValidationError
 from aisurgeon.extraction.gemini.models import GeminiModelConfig, RemoteFileMetadata
@@ -58,6 +59,9 @@ class CanonicalGeminiClient(GeminiDocumentMapClient):
         schema = GeminiDocumentMapClient.request_schema(model)
         python_only_fields = {
             "item_id",
+            "formal_item_id",
+            "sequence_number",
+            "normalized_item_family",
             "comment_id",
             "reference_id",
             "object_id",
@@ -73,6 +77,9 @@ class CanonicalGeminiClient(GeminiDocumentMapClient):
                 if isinstance(properties, dict):
                     for name in python_only_fields:
                         properties.pop(name, None)
+                    schema_version = properties.get("schema_version")
+                    if isinstance(schema_version, dict):
+                        schema_version["enum"] = [SCHEMA_VERSION]
                 required = value.get("required")
                 if isinstance(required, list):
                     value["required"] = [

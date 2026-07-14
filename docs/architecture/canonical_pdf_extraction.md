@@ -36,3 +36,17 @@ uv run aisurgeon extract-guideline --pdf /path/to/guideline.pdf \
 
 PubMed retrieval, evidence mapping, update decisions, GPT synthesis, Source Lock, targeted repair,
 and DOCX generation are not part of this phase.
+
+## Formal-item backbone version 2
+
+`formal_items.jsonl` is the sole chronological canonical master. Recommendations, statements,
+consensus statements, expert-consensus/EK items, Good Clinical Practice items, and other native
+formal types enter the same merge without priority. Python preserves `item_type_raw`, assigns the
+normalized family and the cross-family `sequence_number` after merge, and derives recommendation,
+statement, and expert-consensus views from the master.
+
+New runs use `gemini_formal_items_comments_v2` and `canonical_extraction_v2`. Their directory name
+contains UTC time, source ID, PDF hash prefix, prompt version/hash, and schema version. A checkpoint
+is reusable only when source/PDF, model and model configuration, prompt version/hash, schema, and
+window settings exactly match the run context. Resume requires an explicit compatible run path;
+older runs without that context cannot be resumed.

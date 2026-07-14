@@ -20,10 +20,17 @@ from aisurgeon.extraction.canonical.core import (
 from aisurgeon.extraction.canonical.models import (
     ClinicalContextBlock,
     Comment,
+    ExtractionBatch,
     FormalItem,
     Reference,
 )
-from aisurgeon.extraction.canonical.outputs import write_jsonl, write_review_workbook
+from aisurgeon.extraction.canonical.outputs import (
+    expert_consensus_view,
+    recommendation_view,
+    statement_view,
+    write_jsonl,
+    write_review_workbook,
+)
 from aisurgeon.extraction.canonical.pipeline import pending_windows
 from aisurgeon.extraction.gemini.models import PageRange
 
@@ -110,7 +117,7 @@ def test_deterministic_ids_for_numbered_and_unnumbered_items() -> None:
 
 
 def test_overlap_duplicate_is_merged_but_conflict_is_retained() -> None:
-    duplicate = item(extraction_batch_id="batch-2")
+    duplicate = item(extraction_batch_id="batch-2", page_start=11, page_end=11)
     conflict = item(exact_original_text="Abweichender Originaltext.", page_start=11, page_end=11)
     merged, findings = merge_formal_items([item(), duplicate, conflict])
     assert len(merged) == 2
@@ -194,3 +201,96 @@ def test_resume_skips_completed_checkpoint(tmp_path: Path) -> None:
         '{"status":"completed"}', encoding="utf-8"
     )
     assert pending_windows(windows, tmp_path) == [windows[1]]
+
+
+def test_all_formal_families_share_one_chronological_backbone() -> None:
+    labels = [
+        ("Evidenzbasierte Empfehlung", "2.1", "recommendation"),
+        ("Evidenzbasiertes Statement", "2.2", "statement"),
+        ("Konsensbasierte Empfehlung", "2.3", "recommendation"),
+        ("Konsensbasiertes Statement", "2.4", "consensus_statement"),
+        ("Konsensusstatement", "2.5", "consensus_statement"),
+        ("Expertenkonsens", "2.6", "expert_consensus"),
+    ]
+    items = [
+        item(
+            item_type=("statement" if "Statement" in raw or "statement" in raw else
+                       "recommendation" if "Empfehlung" in raw else "other_formal_item"),
+            item_type_raw=raw,
+            original_number=number,
+            exact_original_text=f"Originaltext {number}",
+            page_start=20,
+            page_end=20,
+        )
+        for raw, number, _family in labels
+    ]
+    merged, _ = merge_formal_items(items)
+    assert [value.original_number for value in merged] == [value[1] for value in labels]
+    assert [value.normalized_item_family for value in merged] == [
+        value[2] for value in labels
+    ]
+    assert [value.sequence_number for value in merged] == list(range(1, 7))
+    assert [value.original_number for value in recommendation_view(merged)] == ["2.1", "2.3"]
+    assert [value.original_number for value in statement_view(merged)] == [
+        "2.2", "2.4", "2.5"
+    ]
+    assert [value.original_number for value in expert_consensus_view(merged)] == ["2.6"]
+
+    comments = [comment(related_original_number=number, exact_original_text=f"Kommentar {number}")
+                for _raw, number, _family in labels]
+    assert link_comments(comments, merged) == []
+    assert all(value.linked_formal_item_ids for value in comments)
+
+
+@pytest.mark.parametrize(
+    ("raw", "family"),
+    [
+        ("Evidenzbasierte Empfehlung", "recommendation"),
+        ("Konsensbasierte Empfehlung", "recommendation"),
+        ("Evidenzbasiertes Statement", "statement"),
+        ("Konsensbasiertes Statement", "consensus_statement"),
+        ("Konsensusstatement", "consensus_statement"),
+        ("Expertenkonsens", "expert_consensus"),
+        ("EK", "expert_consensus"),
+        ("EK-Empfehlung", "expert_consensus"),
+    ],
+)
+def test_german_native_item_labels_are_normalized(raw: str, family: str) -> None:
+    formal = item(item_type="other_formal_item", item_type_raw=raw)
+    merged, _ = merge_formal_items([formal])
+    assert merged[0].normalized_item_family == family
+
+
+def test_unknown_formal_type_is_retained_for_review() -> None:
+    unknown = item(item_type="other_formal_item", item_type_raw="Quellenformat X")
+    merged, _ = merge_formal_items([unknown])
+    assert merged == [unknown]
+    assert unknown.normalized_item_family == "other_formal_item"
+    assert unknown.review_required is True
+    assert "unknown_formal_item_type" in unknown.review_reasons
+
+
+def test_v1_formal_item_remains_readable() -> None:
+    legacy = item(schema_version="canonical_extraction_v1")
+    assert legacy.schema_version == "canonical_extraction_v1"
+
+
+def test_committed_v2_extraction_schema_matches_model() -> None:
+    schema = json.loads(
+        Path("schemas/extraction/canonical_extraction_v2.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert schema == ExtractionBatch.model_json_schema()
+
+
+def test_prompt_v2_is_active_and_v1_remains_historical() -> None:
+    v1 = Path("config/prompts/gemini_formal_items_comments_v1.txt").read_text(
+        encoding="utf-8"
+    )
+    v2 = Path("config/prompts/gemini_formal_items_comments_v2.txt").read_text(
+        encoding="utf-8"
+    )
+    assert "prompt_version = gemini_formal_items_comments_v2" in v2
+    assert "All source-native formal item types are equally important" in v2
+    assert "prompt_version" not in v1

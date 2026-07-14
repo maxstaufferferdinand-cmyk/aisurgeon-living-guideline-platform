@@ -11,6 +11,22 @@ from openpyxl.styles import Font
 
 from aisurgeon.extraction.canonical.models import ReviewFinding
 
+RECOMMENDATION_FAMILIES = frozenset({"recommendation"})
+STATEMENT_FAMILIES = frozenset({"statement", "consensus_statement"})
+EXPERT_CONSENSUS_FAMILIES = frozenset({"expert_consensus"})
+
+
+def recommendation_view(records: Iterable[Any]) -> list[Any]:
+    return [item for item in records if item.normalized_item_family in RECOMMENDATION_FAMILIES]
+
+
+def statement_view(records: Iterable[Any]) -> list[Any]:
+    return [item for item in records if item.normalized_item_family in STATEMENT_FAMILIES]
+
+
+def expert_consensus_view(records: Iterable[Any]) -> list[Any]:
+    return [item for item in records if item.normalized_item_family in EXPERT_CONSENSUS_FAMILIES]
+
 
 def _exclusive_write(path: Path, content: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -62,6 +78,7 @@ CANONICAL_OUTPUTS = (
     "formal_items.jsonl",
     "recommendations.jsonl",
     "statements.jsonl",
+    "expert_consensus_items.jsonl",
     "comments.jsonl",
     "references.jsonl",
     "tables.jsonl",

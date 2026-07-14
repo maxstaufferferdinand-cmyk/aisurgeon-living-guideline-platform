@@ -21,12 +21,16 @@ from aisurgeon.extraction.canonical.core import (
     plan_windows,
 )
 from aisurgeon.extraction.canonical.models import (
+    SCHEMA_VERSION,
     ExtractionBatch,
     ReferenceBatch,
     VisualObjectBatch,
 )
 from aisurgeon.extraction.canonical.outputs import (
     CANONICAL_OUTPUTS,
+    expert_consensus_view,
+    recommendation_view,
+    statement_view,
     write_json,
     write_jsonl,
     write_review_workbook,
@@ -44,10 +48,11 @@ from aisurgeon.extraction.gemini.models import DocumentMap, PageRange
 from aisurgeon.extraction.pdf_registration import PdfRegistration, register_pdf
 
 PROMPT_FILES = {
-    "clinical": "gemini_formal_items_comments_v1.txt",
+    "clinical": "gemini_formal_items_comments_v2.txt",
     "references": "gemini_references_v1.txt",
     "visuals": "gemini_visual_objects_v1.txt",
 }
+CLINICAL_PROMPT_VERSION = "gemini_formal_items_comments_v2"
 
 
 def plan_extraction(
@@ -95,6 +100,7 @@ def prepare_dry_run(
     pages_per_job: int = 8,
     overlap_pages: int = 1,
     project_root: Path | None = None,
+    now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> tuple[dict[str, Any], Path]:
     root = project_root or find_project_root()
     output = ensure_output_outside_repository(output_root, root)
@@ -103,7 +109,12 @@ def prepare_dry_run(
         registration, None, pages_per_job=pages_per_job, overlap_pages=overlap_pages
     )
     _, branch, dirty = git_metadata(root)
-    run_id = f"extract-dry-{registration.source_id}-{registration.sha256[:8]}"
+    _prompt_text, prompt_hash = _load_extraction_prompt(root)
+    timestamp = now().astimezone(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+    run_id = (
+        f"extract-dry-{timestamp}-{registration.source_id}-{registration.sha256[:8]}-"
+        f"{CLINICAL_PROMPT_VERSION}-{prompt_hash[:8]}-{SCHEMA_VERSION}"
+    )
     run_dir = output / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
     plan = {
@@ -117,6 +128,9 @@ def prepare_dry_run(
         "dirty_worktree": dirty,
         "pages_per_job": pages_per_job,
         "overlap_pages": overlap_pages,
+        "prompt_version": CLINICAL_PROMPT_VERSION,
+        "prompt_sha256": prompt_hash,
+        "schema_version": SCHEMA_VERSION,
         "jobs": [window.model_dump() for window in windows],
         "planned_outputs": list(CANONICAL_OUTPUTS),
         "created_at_utc": datetime.now(UTC).isoformat(),
@@ -128,18 +142,30 @@ def prepare_dry_run(
     return plan, run_dir
 
 
-def checkpoint_complete(checkpoint_dir: Path, job_id: str) -> bool:
+def checkpoint_complete(
+    checkpoint_dir: Path, job_id: str, compatibility: dict[str, Any] | None = None
+) -> bool:
     path = checkpoint_dir / f"{job_id}.json"
     if not path.is_file():
         return False
     try:
-        return json.loads(path.read_text(encoding="utf-8")).get("status") == "completed"
+        value = json.loads(path.read_text(encoding="utf-8"))
+        return value.get("status") == "completed" and (
+            compatibility is None or value.get("compatibility") == compatibility
+        )
     except (OSError, json.JSONDecodeError):
         return False
 
 
-def pending_windows(windows: list[PageWindow], checkpoint_dir: Path) -> list[PageWindow]:
-    return [window for window in windows if not checkpoint_complete(checkpoint_dir, window.job_id)]
+def pending_windows(
+    windows: list[PageWindow],
+    checkpoint_dir: Path,
+    compatibility: dict[str, Any] | None = None,
+) -> list[PageWindow]:
+    return [
+        window for window in windows
+        if not checkpoint_complete(checkpoint_dir, window.job_id, compatibility)
+    ]
 
 
 def _read_checkpoint(path: Path) -> dict[str, Any]:
@@ -170,21 +196,37 @@ def _replace_json(path: Path, value: Any) -> None:
 
 
 def _request_with_checkpoint(
-    *, gateway: CanonicalGeminiClient, remote: Any, prompt: str, model: Any,
-    status_path: Path, raw_path: Path, validated_path: Path,
+    *,
+    gateway: CanonicalGeminiClient,
+    remote: Any,
+    prompt: str,
+    model: Any,
+    status_path: Path,
+    raw_path: Path,
+    validated_path: Path,
+    compatibility: dict[str, Any],
     job: dict[str, Any] | None = None,
 ) -> tuple[Any, dict[str, int] | None]:
-    _write_checkpoint(status_path, {"status": "in_progress", "job": job})
+    _write_checkpoint(
+        status_path,
+        {"status": "in_progress", "job": job, "compatibility": compatibility},
+    )
     try:
         validated, raw, usage = gateway.request_structured(
             remote=remote, prompt=prompt, model=model
         )
     except GeminiError:
-        _write_checkpoint(status_path, {"status": "failed", "job": job})
+        _write_checkpoint(
+            status_path,
+            {"status": "failed", "job": job, "compatibility": compatibility},
+        )
         raise
     _replace_json(raw_path, json.loads(raw))
     _replace_json(validated_path, validated)
-    _write_checkpoint(status_path, {"status": "completed", "job": job})
+    _write_checkpoint(
+        status_path,
+        {"status": "completed", "job": job, "compatibility": compatibility},
+    )
     return validated, usage
 
 
@@ -192,11 +234,43 @@ def _prompt(root: Path, name: str) -> str:
     return (root / "config" / "prompts" / PROMPT_FILES[name]).read_text(encoding="utf-8")
 
 
+def _load_extraction_prompt(root: Path) -> tuple[str, str]:
+    prompt = _prompt(root, "clinical")
+    return prompt, hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+
+
+def _compatibility_context(
+    *,
+    registration: PdfRegistration,
+    model_config: Any,
+    prompt_hash: str,
+    pages_per_job: int,
+    overlap_pages: int,
+) -> dict[str, Any]:
+    model_value = model_config.model_dump(mode="json")
+    model_hash = hashlib.sha256(
+        json.dumps(model_value, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    return {
+        "source_id": registration.source_id,
+        "pdf_sha256": registration.sha256,
+        "model_id": model_config.model_id,
+        "model_config": model_value,
+        "model_config_sha256": model_hash,
+        "prompt_version": CLINICAL_PROMPT_VERSION,
+        "prompt_sha256": prompt_hash,
+        "schema_version": SCHEMA_VERSION,
+        "pages_per_job": pages_per_job,
+        "overlap_pages": overlap_pages,
+    }
+
+
 def _job_prompt(base: str, source_id: str, window: PageWindow) -> str:
     return (
         f"source_id: {source_id}\nprimary pages: {window.primary_page_start}-"
         f"{window.primary_page_end}\ncontext pages: {window.context_page_start}-"
-        f"{window.context_page_end}\n\n{base}"
+        f"{window.context_page_end}\nschema_version: {SCHEMA_VERSION}\n"
+        f"prompt_version: {CLINICAL_PROMPT_VERSION}\n\n{base}"
     )
 
 
@@ -213,6 +287,8 @@ def run_live_extraction(
     keep_remote_file: bool = False,
     project_root: Path | None = None,
     client_factory: Callable[..., CanonicalGeminiClient] = CanonicalGeminiClient,
+    resume_run_dir: Path | None = None,
+    now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> tuple[str, Path]:
     """Execute one-upload staged extraction with per-window checkpoints."""
     root = project_root or find_project_root()
@@ -221,12 +297,31 @@ def run_live_extraction(
     commit, branch, dirty = git_metadata(root)
     if dirty and not allow_dirty:
         raise ValueError("Live-Lauf bei Dirty Worktree gesperrt.")
-    run_dir = output / f"extract-{source_id}-{registration.sha256[:8]}"
-    run_dir.mkdir(parents=True, exist_ok=True)
-    checkpoint_dir = run_dir / "checkpoints"
-    checkpoint_dir.mkdir(exist_ok=True)
     config, _ = load_model_config(root)
     doc_prompt, _ = load_prompt(root)
+    clinical_prompt, clinical_prompt_hash = _load_extraction_prompt(root)
+    compatibility = _compatibility_context(
+        registration=registration, model_config=config, prompt_hash=clinical_prompt_hash,
+        pages_per_job=pages_per_job, overlap_pages=overlap_pages,
+    )
+    if resume_run_dir is None:
+        timestamp = now().astimezone(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+        run_id = (
+            f"extract-{timestamp}-{source_id}-{registration.sha256[:8]}-"
+            f"{CLINICAL_PROMPT_VERSION}-{clinical_prompt_hash[:8]}-{SCHEMA_VERSION}"
+        )
+        run_dir = output / run_id
+        run_dir.mkdir(parents=True, exist_ok=False)
+        write_json(run_dir / "run_context.json", compatibility)
+    else:
+        run_dir = resume_run_dir.resolve()
+        if run_dir.parent != output or not run_dir.is_dir():
+            raise ValueError("Resume-Run liegt nicht im gewählten Output-Root.")
+        context_path = run_dir / "run_context.json"
+        if _read_checkpoint(context_path) != compatibility:
+            raise ValueError("Resume-Run ist mit der aktuellen Extraktion nicht kompatibel.")
+    checkpoint_dir = run_dir / "checkpoints"
+    checkpoint_dir.mkdir(exist_ok=True)
     gateway = client_factory(api_key=api_key, model_config=config)
     remote = gateway.upload_pdf(pdf_path)
     findings = []
@@ -241,6 +336,7 @@ def run_live_extraction(
                 prompt=f"source_id: {source_id}\n\n{doc_prompt}", model=DocumentMap,
                 status_path=checkpoint_dir / "document-map.json",
                 raw_path=run_dir / "document_map.raw.json", validated_path=map_path,
+                compatibility=compatibility,
             )
             report = validate_document_map(document_map, registration)
             if not report.valid:
@@ -254,16 +350,24 @@ def run_live_extraction(
             validated_path = checkpoint_dir / f"{window.job_id}.validated.json"
             status_path = checkpoint_dir / f"{window.job_id}.json"
             model = ExtractionBatch if window.stage == "clinical" else ReferenceBatch
-            if checkpoint_complete(checkpoint_dir, window.job_id) and validated_path.exists():
+            if (
+                checkpoint_complete(checkpoint_dir, window.job_id, compatibility)
+                and validated_path.exists()
+            ):
                 batch = model.model_validate_json(validated_path.read_text(encoding="utf-8"))
             else:
                 batch, usage = _request_with_checkpoint(
                     gateway=gateway, remote=remote,
-                    prompt=_job_prompt(_prompt(root, window.stage), source_id, window),
+                    prompt=_job_prompt(
+                        clinical_prompt if window.stage == "clinical"
+                        else _prompt(root, window.stage),
+                        source_id, window,
+                    ),
                     model=model,
                     status_path=status_path,
                     raw_path=checkpoint_dir / f"{window.job_id}.raw.json",
                     validated_path=validated_path, job=window.model_dump(),
+                    compatibility=compatibility,
                 )
                 for key, value in (usage or {}).items():
                     token_usage[key] = token_usage.get(key, 0) + value
@@ -275,7 +379,10 @@ def run_live_extraction(
                 references.extend(batch.references)
         visual_status = checkpoint_dir / "visual-objects.json"
         visual_validated = checkpoint_dir / "visual-objects.validated.json"
-        if checkpoint_complete(checkpoint_dir, "visual-objects") and visual_validated.exists():
+        if (
+            checkpoint_complete(checkpoint_dir, "visual-objects", compatibility)
+            and visual_validated.exists()
+        ):
             visual_batch = VisualObjectBatch.model_validate_json(
                 visual_validated.read_text(encoding="utf-8")
             )
@@ -287,6 +394,7 @@ def run_live_extraction(
             model=VisualObjectBatch,
             status_path=visual_status, raw_path=run_dir / "visual_objects.raw.json",
             validated_path=visual_validated,
+            compatibility=compatibility,
             )
         visuals.extend(visual_batch.visual_objects)
         for value in references:
@@ -312,11 +420,15 @@ def run_live_extraction(
         write_jsonl(run_dir / "formal_items.jsonl", formal_items)
         write_jsonl(
             run_dir / "recommendations.jsonl",
-            (item for item in formal_items if item.item_type == "recommendation"),
+            recommendation_view(formal_items),
         )
         write_jsonl(
             run_dir / "statements.jsonl",
-            (item for item in formal_items if item.item_type == "statement"),
+            statement_view(formal_items),
+        )
+        write_jsonl(
+            run_dir / "expert_consensus_items.jsonl",
+            expert_consensus_view(formal_items),
         )
         write_jsonl(run_dir / "comments.jsonl", comments)
         write_jsonl(run_dir / "references.jsonl", references)
@@ -361,6 +473,7 @@ def run_live_extraction(
                 "git_branch": branch,
                 "dirty_worktree": dirty,
                 "model_id": config.model_id,
+                **compatibility,
                 "token_usage": token_usage or usage,
                 "output_files": output_hashes,
                 "remote_file_deleted": remote_deleted,

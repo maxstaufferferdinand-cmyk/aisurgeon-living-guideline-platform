@@ -4,7 +4,15 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-SCHEMA_VERSION = "canonical_extraction_v1"
+SCHEMA_VERSION = "canonical_extraction_v2"
+SUPPORTED_SCHEMA_VERSIONS = Literal["canonical_extraction_v1", "canonical_extraction_v2"]
+NormalizedItemFamily = Literal[
+    "recommendation",
+    "statement",
+    "consensus_statement",
+    "expert_consensus",
+    "other_formal_item",
+]
 
 
 class StrictModel(BaseModel):
@@ -12,7 +20,7 @@ class StrictModel(BaseModel):
 
 
 class SourceObject(StrictModel):
-    schema_version: Literal["canonical_extraction_v1"] = SCHEMA_VERSION
+    schema_version: SUPPORTED_SCHEMA_VERSIONS = SCHEMA_VERSION
     source_id: str = Field(min_length=1)
     page_start: int = Field(ge=1)
     page_end: int = Field(ge=1)
@@ -30,8 +38,11 @@ class SourceObject(StrictModel):
 class FormalItem(SourceObject):
     extraction_batch_id: str = Field(min_length=1)
     item_id: str | None = None
+    formal_item_id: str | None = None
+    sequence_number: int | None = Field(default=None, ge=1)
     item_type: Literal["recommendation", "statement", "other_formal_item"]
     item_type_raw: str | None = None
+    normalized_item_family: NormalizedItemFamily | None = None
     original_number: str | None = None
     topic_or_short_title_raw: str | None = None
     exact_original_text: str = Field(min_length=1)
@@ -45,6 +56,12 @@ class FormalItem(SourceObject):
     linked_comment_ids: list[str] = Field(default_factory=list)
     unresolved_reference_numbers: list[str] = Field(default_factory=list)
 
+    @model_validator(mode="after")
+    def synchronize_legacy_id(self) -> "FormalItem":
+        self.formal_item_id = self.formal_item_id or self.item_id
+        self.item_id = self.item_id or self.formal_item_id
+        return self
+
 
 class Comment(SourceObject):
     extraction_batch_id: str = Field(min_length=1)
@@ -54,9 +71,17 @@ class Comment(SourceObject):
     related_original_number: str | None = None
     related_formal_item_type_raw: str | None = None
     linked_item_ids: list[str] = Field(default_factory=list)
+    linked_formal_item_ids: list[str] = Field(default_factory=list)
     inline_reference_numbers: list[str] = Field(default_factory=list)
     unresolved_reference_numbers: list[str] = Field(default_factory=list)
     chapter_path_raw: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def synchronize_legacy_links(self) -> "Comment":
+        links = list(dict.fromkeys((*self.linked_formal_item_ids, *self.linked_item_ids)))
+        self.linked_formal_item_ids = links
+        self.linked_item_ids = links
+        return self
 
 
 class Reference(SourceObject):
