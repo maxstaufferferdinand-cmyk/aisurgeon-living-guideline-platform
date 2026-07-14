@@ -34,6 +34,7 @@ class InventoryObject(StrictModel):
     extraction_confidence: float = Field(ge=0, le=1)
     review_required: bool
 
+
 class DocumentMap(StrictModel):
     """PDF-adaptive structural map; this is not recommendation extraction."""
 
@@ -66,17 +67,18 @@ class DocumentMap(StrictModel):
     uncertain_regions: list[PageRange] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
 
+
 class GeminiModelConfig(StrictModel):
     """Versioned, shared request configuration."""
 
     provider: Literal["google"]
-    api: Literal["interactions"]
+    api: Literal["interactions", "generate_content"]
     model_id: Literal["gemini-3.5-flash"]
     thinking_level: Literal["medium"]
     media_resolution: Literal["high"]
     prompt_version: Literal["gemini_document_map_v1"]
     schema_version: Literal["document_map_v1"]
-    request_timeout_seconds: int = Field(gt=0, le=600)
+    request_timeout_seconds: int = Field(gt=0, le=1200)
     max_attempts: int = Field(ge=1, le=5)
 
 

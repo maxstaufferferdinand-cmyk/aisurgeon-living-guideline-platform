@@ -60,6 +60,14 @@ CLINICAL_PROMPT_VERSION = "gemini_formal_items_comments_v2"
 DOCUMENT_MAP_PROMPT_VERSION = "gemini_document_map_v1"
 
 
+def load_canonical_model_config(root: Path) -> Any:
+    """Represent the actual GenerateContent transport in canonical audit metadata."""
+    config, _raw = load_model_config(root)
+    value = config.model_dump(mode="json")
+    value.update({"api": "generate_content", "request_timeout_seconds": 1200})
+    return type(config).model_validate(value)
+
+
 def plan_extraction(
     registration: PdfRegistration,
     document_map: DocumentMap | None,
@@ -173,7 +181,8 @@ def pending_windows(
     compatibility: dict[str, Any] | None = None,
 ) -> list[PageWindow]:
     return [
-        window for window in windows
+        window
+        for window in windows
         if not checkpoint_complete(checkpoint_dir, window.job_id, compatibility)
     ]
 
@@ -315,7 +324,7 @@ def run_live_extraction(
     commit, branch, dirty = git_metadata(root)
     if dirty and not allow_dirty:
         raise ValueError("Live-Lauf bei Dirty Worktree gesperrt.")
-    config, _ = load_model_config(root)
+    config = load_canonical_model_config(root)
     doc_prompt, document_map_prompt_hash = load_prompt(root)
     clinical_prompt, clinical_prompt_hash = _load_extraction_prompt(root)
     compatibility = _compatibility_context(
@@ -323,7 +332,8 @@ def run_live_extraction(
         model_config=config,
         document_map_prompt_hash=document_map_prompt_hash,
         formal_items_prompt_hash=clinical_prompt_hash,
-        pages_per_job=pages_per_job, overlap_pages=overlap_pages,
+        pages_per_job=pages_per_job,
+        overlap_pages=overlap_pages,
     )
     if resume_run_dir is None:
         timestamp = now().astimezone(UTC).strftime("%Y%m%dT%H%M%S%fZ")
@@ -354,10 +364,13 @@ def run_live_extraction(
             document_map = DocumentMap.model_validate_json(map_path.read_text(encoding="utf-8"))
         else:
             document_map, usage = _request_with_checkpoint(
-                gateway=gateway, remote=remote,
-                prompt=f"source_id: {source_id}\n\n{doc_prompt}", model=DocumentMap,
+                gateway=gateway,
+                remote=remote,
+                prompt=f"source_id: {source_id}\n\n{doc_prompt}",
+                model=DocumentMap,
                 status_path=checkpoint_dir / "document-map.json",
-                raw_path=run_dir / "document_map.raw.json", validated_path=map_path,
+                raw_path=run_dir / "document_map.raw.json",
+                validated_path=map_path,
                 compatibility=compatibility,
             )
             report = validate_document_map(document_map, registration)
@@ -379,16 +392,20 @@ def run_live_extraction(
                 batch = model.model_validate_json(validated_path.read_text(encoding="utf-8"))
             else:
                 batch, usage = _request_with_checkpoint(
-                    gateway=gateway, remote=remote,
+                    gateway=gateway,
+                    remote=remote,
                     prompt=_job_prompt(
-                        clinical_prompt if window.stage == "clinical"
+                        clinical_prompt
+                        if window.stage == "clinical"
                         else _prompt(root, window.stage),
-                        source_id, window,
+                        source_id,
+                        window,
                     ),
                     model=model,
                     status_path=status_path,
                     raw_path=checkpoint_dir / f"{window.job_id}.raw.json",
-                    validated_path=validated_path, job=window.model_dump(),
+                    validated_path=validated_path,
+                    job=window.model_dump(),
                     compatibility=compatibility,
                 )
                 for key, value in (usage or {}).items():
@@ -411,12 +428,14 @@ def run_live_extraction(
             usage = None
         else:
             visual_batch, usage = _request_with_checkpoint(
-            gateway=gateway, remote=remote,
-            prompt=f"source_id: {source_id}\n\n{_prompt(root, 'visuals')}",
-            model=VisualObjectBatch,
-            status_path=visual_status, raw_path=run_dir / "visual_objects.raw.json",
-            validated_path=visual_validated,
-            compatibility=compatibility,
+                gateway=gateway,
+                remote=remote,
+                prompt=f"source_id: {source_id}\n\n{_prompt(root, 'visuals')}",
+                model=VisualObjectBatch,
+                status_path=visual_status,
+                raw_path=run_dir / "visual_objects.raw.json",
+                validated_path=visual_validated,
+                compatibility=compatibility,
             )
         visuals.extend(visual_batch.visual_objects)
         for value in references:

@@ -13,7 +13,6 @@ from aisurgeon.extraction.canonical.models import (
     ExtractionBatch,
     VisualObjectBatch,
 )
-from aisurgeon.extraction.gemini.document_map import load_model_config
 from aisurgeon.extraction.gemini.models import DocumentMap, RemoteFileMetadata
 from aisurgeon.extraction.pdf_registration import register_pdf
 
@@ -95,12 +94,12 @@ def test_live_pipeline_reuses_one_upload_and_writes_outputs(
     )
     assert checkpoint["status"] == "completed"
     assert checkpoint["job"] == {
-            "job_id": "clinical-0001-0002",
-            "stage": "clinical",
-            "primary_page_start": 1,
-            "primary_page_end": 2,
-            "context_page_start": 1,
-            "context_page_end": 2,
+        "job_id": "clinical-0001-0002",
+        "stage": "clinical",
+        "primary_page_start": 1,
+        "primary_page_end": 2,
+        "context_page_start": 1,
+        "context_page_end": 2,
     }
     assert checkpoint["compatibility"]["formal_items_prompt_version"] == (
         "gemini_formal_items_comments_v2"
@@ -109,6 +108,7 @@ def test_live_pipeline_reuses_one_upload_and_writes_outputs(
     assert checkpoint["compatibility"]["canonical_extraction_schema_version"] == (
         "canonical_extraction_v2"
     )
+    assert checkpoint["compatibility"]["model_config"]["api"] == "generate_content"
     assert "Do not extract or reproduce complete recommendation" in FakeGateway.requested_prompts[0]
     assert "prompt_version = gemini_formal_items_comments_v2" in FakeGateway.requested_prompts[1]
     formal = json.loads((run_dir / "formal_items.jsonl").read_text(encoding="utf-8"))
@@ -126,13 +126,15 @@ def test_resume_does_not_repeat_successful_clinical_window(
     fixed_now = datetime(2026, 7, 14, 12, 30, tzinfo=UTC)
     prompt, prompt_hash = pipeline._load_extraction_prompt(Path.cwd())
     del prompt
-    config, _ = load_model_config(Path.cwd())
+    config = pipeline.load_canonical_model_config(Path.cwd())
     _document_map_prompt, document_map_prompt_hash = pipeline.load_prompt(Path.cwd())
     compatibility = pipeline._compatibility_context(
-        registration=registration, model_config=config,
+        registration=registration,
+        model_config=config,
         document_map_prompt_hash=document_map_prompt_hash,
         formal_items_prompt_hash=prompt_hash,
-        pages_per_job=8, overlap_pages=1,
+        pages_per_job=8,
+        overlap_pages=1,
     )
     run_id = (
         f"extract-20260714T123000000000Z-SOURCE-{registration.sha256[:8]}-"
@@ -141,23 +143,31 @@ def test_resume_does_not_repeat_successful_clinical_window(
     run_dir = tmp_path / "runs" / run_id
     checkpoint_dir = run_dir / "checkpoints"
     checkpoint_dir.mkdir(parents=True)
-    (run_dir / "run_context.json").write_text(
-        json.dumps(compatibility), encoding="utf-8"
-    )
+    (run_dir / "run_context.json").write_text(json.dumps(compatibility), encoding="utf-8")
     document_map = DocumentMap(
-        schema_version="document_map_v1", source_id="SOURCE", declared_page_count=2,
+        schema_version="document_map_v1",
+        source_id="SOURCE",
+        declared_page_count=2,
         clinical_main_body_page_ranges=[{"page_start": 1, "page_end": 2}],
         detected_formal_item_types=["Empfehlung"],
     )
     (run_dir / "document_map.validated.json").write_text(
         document_map.model_dump_json(), encoding="utf-8"
     )
-    batch = ExtractionBatch(formal_items=[{
-        "source_id": "SOURCE", "extraction_batch_id": "clinical-0001-0002",
-        "item_type": "recommendation", "original_number": "1.1",
-        "exact_original_text": "Bereits persistierter Originaltext.",
-        "page_start": 1, "page_end": 1, "extraction_confidence": 1,
-    }])
+    batch = ExtractionBatch(
+        formal_items=[
+            {
+                "source_id": "SOURCE",
+                "extraction_batch_id": "clinical-0001-0002",
+                "item_type": "recommendation",
+                "original_number": "1.1",
+                "exact_original_text": "Bereits persistierter Originaltext.",
+                "page_start": 1,
+                "page_end": 1,
+                "extraction_confidence": 1,
+            }
+        ]
+    )
     (checkpoint_dir / "clinical-0001-0002.validated.json").write_text(
         batch.model_dump_json(), encoding="utf-8"
     )
@@ -166,10 +176,15 @@ def test_resume_does_not_repeat_successful_clinical_window(
     )
     monkeypatch.setattr(pipeline, "git_metadata", lambda root: ("a" * 40, "test", False))
     pipeline.run_live_extraction(
-        pdf_path=synthetic_pdf, worker_id="worker", source_id="SOURCE",
-        output_root=tmp_path / "runs", api_key=SecretStr("dummy"),
-        project_root=Path.cwd(), client_factory=FakeGateway,
-        resume_run_dir=run_dir, now=lambda: fixed_now,
+        pdf_path=synthetic_pdf,
+        worker_id="worker",
+        source_id="SOURCE",
+        output_root=tmp_path / "runs",
+        api_key=SecretStr("dummy"),
+        project_root=Path.cwd(),
+        client_factory=FakeGateway,
+        resume_run_dir=run_dir,
+        now=lambda: fixed_now,
     )
     assert ExtractionBatch not in FakeGateway.requested_models
     assert FakeGateway.uploads == FakeGateway.deletes == 1
@@ -178,8 +193,10 @@ def test_resume_does_not_repeat_successful_clinical_window(
 def test_checkpoint_is_rejected_when_any_compatibility_field_differs(tmp_path: Path) -> None:
     job_id = "clinical-0001-0008"
     expected = {
-        "source_id": "SOURCE", "pdf_sha256": "a" * 64,
-        "model_id": "gemini-3.5-flash", "model_config": {"thinking_level": "medium"},
+        "source_id": "SOURCE",
+        "pdf_sha256": "a" * 64,
+        "model_id": "gemini-3.5-flash",
+        "model_config": {"thinking_level": "medium"},
         "model_config_sha256": "b" * 64,
         "document_map_schema_version": "document_map_v1",
         "canonical_extraction_schema_version": "canonical_extraction_v2",
@@ -187,7 +204,8 @@ def test_checkpoint_is_rejected_when_any_compatibility_field_differs(tmp_path: P
         "formal_items_prompt_version": "gemini_formal_items_comments_v2",
         "document_map_prompt_hash": "c" * 64,
         "formal_items_prompt_hash": "d" * 64,
-        "pages_per_job": 8, "overlap_pages": 1,
+        "pages_per_job": 8,
+        "overlap_pages": 1,
     }
     (tmp_path / f"{job_id}.json").write_text(
         json.dumps({"status": "completed", "compatibility": expected}), encoding="utf-8"
