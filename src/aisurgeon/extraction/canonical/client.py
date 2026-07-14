@@ -7,10 +7,20 @@ from typing import Any, TypeVar
 
 from pydantic import BaseModel, SecretStr, ValidationError
 
-from aisurgeon.extraction.canonical.models import SCHEMA_VERSION
+from aisurgeon.extraction.canonical.models import (
+    CANONICAL_EXTRACTION_SCHEMA_VERSION,
+    ExtractionBatch,
+    ReferenceBatch,
+    VisualObjectBatch,
+)
 from aisurgeon.extraction.gemini.client import GeminiDocumentMapClient
 from aisurgeon.extraction.gemini.errors import GeminiResponseValidationError
-from aisurgeon.extraction.gemini.models import GeminiModelConfig, RemoteFileMetadata
+from aisurgeon.extraction.gemini.models import (
+    DOCUMENT_MAP_SCHEMA_VERSION,
+    DocumentMap,
+    GeminiModelConfig,
+    RemoteFileMetadata,
+)
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
 GENERATE_CONTENT_TIMEOUT_SECONDS = 1200
@@ -62,6 +72,8 @@ class CanonicalGeminiClient(GeminiDocumentMapClient):
             "formal_item_id",
             "sequence_number",
             "normalized_item_family",
+            "schema_version",
+            "source_id",
             "comment_id",
             "reference_id",
             "object_id",
@@ -77,9 +89,6 @@ class CanonicalGeminiClient(GeminiDocumentMapClient):
                 if isinstance(properties, dict):
                     for name in python_only_fields:
                         properties.pop(name, None)
-                    schema_version = properties.get("schema_version")
-                    if isinstance(schema_version, dict):
-                        schema_version["enum"] = [SCHEMA_VERSION]
                 required = value.get("required")
                 if isinstance(required, list):
                     value["required"] = [
@@ -93,6 +102,33 @@ class CanonicalGeminiClient(GeminiDocumentMapClient):
 
         remove_python_fields(schema)
         return schema
+
+    @staticmethod
+    def _inject_technical_fields(
+        payload: dict[str, Any], *, model: type[BaseModel], source_id: str
+    ) -> None:
+        """Inject model-specific trusted fields without weakening content validation."""
+        if model is DocumentMap:
+            payload["schema_version"] = DOCUMENT_MAP_SCHEMA_VERSION
+            payload["source_id"] = source_id
+            return
+        if model not in {ExtractionBatch, ReferenceBatch, VisualObjectBatch}:
+            raise GeminiResponseValidationError("Unbekannter strukturierter Extraktionstyp.")
+        payload["schema_version"] = CANONICAL_EXTRACTION_SCHEMA_VERSION
+        payload["source_id"] = source_id
+
+        def inject_source_objects(value: Any) -> None:
+            if isinstance(value, dict):
+                if "page_start" in value and "page_end" in value:
+                    value["schema_version"] = CANONICAL_EXTRACTION_SCHEMA_VERSION
+                    value["source_id"] = source_id
+                for child in value.values():
+                    inject_source_objects(child)
+            elif isinstance(value, list):
+                for child in value:
+                    inject_source_objects(child)
+
+        inject_source_objects(payload)
 
     @staticmethod
     def normalize_generate_content_usage(usage: Any) -> dict[str, int] | None:
@@ -119,7 +155,7 @@ class CanonicalGeminiClient(GeminiDocumentMapClient):
         return normalized or None
 
     def request_structured(
-        self, *, remote: Any, prompt: str, model: type[ModelT]
+        self, *, remote: Any, prompt: str, model: type[ModelT], source_id: str
     ) -> tuple[ModelT, str, dict[str, int] | None]:
         """Call gemini-3.5-flash directly; no agent routing or background interaction."""
         schema = self._canonical_request_schema(model)
@@ -154,7 +190,11 @@ class CanonicalGeminiClient(GeminiDocumentMapClient):
         if not isinstance(raw, str):
             raise GeminiResponseValidationError("Gemini-Antwort enthält kein JSON.")
         try:
-            validated = model.model_validate_json(raw)
+            payload = json.loads(raw)
+            if not isinstance(payload, dict):
+                raise GeminiResponseValidationError("Gemini-Antwort ist kein JSON-Objekt.")
+            self._inject_technical_fields(payload, model=model, source_id=source_id)
+            validated = model.model_validate(payload)
         except (ValidationError, json.JSONDecodeError) as exc:
             raise GeminiResponseValidationError(
                 "Gemini-Extraktionsantwort entspricht nicht dem vollständigen Schema."

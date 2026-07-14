@@ -503,6 +503,24 @@
   },
   "additionalProperties": false,
   "properties": {
+    "schema_version": {
+      "const": "canonical_extraction_v2",
+      "default": "canonical_extraction_v2",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "source_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Source Id"
+    },
     "formal_items": {
       "items": {
         "$ref": "#/$defs/FormalItem"

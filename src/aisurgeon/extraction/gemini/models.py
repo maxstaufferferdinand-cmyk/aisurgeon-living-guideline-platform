@@ -5,6 +5,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+DOCUMENT_MAP_SCHEMA_VERSION = "document_map_v1"
+
 
 class StrictModel(BaseModel):
     """Forbid unversioned or unexpected fields."""

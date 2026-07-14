@@ -21,7 +21,7 @@ from aisurgeon.extraction.canonical.core import (
     plan_windows,
 )
 from aisurgeon.extraction.canonical.models import (
-    SCHEMA_VERSION,
+    CANONICAL_EXTRACTION_SCHEMA_VERSION,
     ExtractionBatch,
     ReferenceBatch,
     VisualObjectBatch,
@@ -44,7 +44,11 @@ from aisurgeon.extraction.gemini.document_map import (
     validate_document_map,
 )
 from aisurgeon.extraction.gemini.errors import GeminiError
-from aisurgeon.extraction.gemini.models import DocumentMap, PageRange
+from aisurgeon.extraction.gemini.models import (
+    DOCUMENT_MAP_SCHEMA_VERSION,
+    DocumentMap,
+    PageRange,
+)
 from aisurgeon.extraction.pdf_registration import PdfRegistration, register_pdf
 
 PROMPT_FILES = {
@@ -53,6 +57,7 @@ PROMPT_FILES = {
     "visuals": "gemini_visual_objects_v1.txt",
 }
 CLINICAL_PROMPT_VERSION = "gemini_formal_items_comments_v2"
+DOCUMENT_MAP_PROMPT_VERSION = "gemini_document_map_v1"
 
 
 def plan_extraction(
@@ -109,11 +114,13 @@ def prepare_dry_run(
         registration, None, pages_per_job=pages_per_job, overlap_pages=overlap_pages
     )
     _, branch, dirty = git_metadata(root)
-    _prompt_text, prompt_hash = _load_extraction_prompt(root)
+    _prompt_text, formal_items_prompt_hash = _load_extraction_prompt(root)
+    _document_map_prompt, document_map_prompt_hash = load_prompt(root)
     timestamp = now().astimezone(UTC).strftime("%Y%m%dT%H%M%S%fZ")
     run_id = (
         f"extract-dry-{timestamp}-{registration.source_id}-{registration.sha256[:8]}-"
-        f"{CLINICAL_PROMPT_VERSION}-{prompt_hash[:8]}-{SCHEMA_VERSION}"
+        f"{CLINICAL_PROMPT_VERSION}-{formal_items_prompt_hash[:8]}-"
+        f"{CANONICAL_EXTRACTION_SCHEMA_VERSION}"
     )
     run_dir = output / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
@@ -128,9 +135,12 @@ def prepare_dry_run(
         "dirty_worktree": dirty,
         "pages_per_job": pages_per_job,
         "overlap_pages": overlap_pages,
-        "prompt_version": CLINICAL_PROMPT_VERSION,
-        "prompt_sha256": prompt_hash,
-        "schema_version": SCHEMA_VERSION,
+        "document_map_schema_version": DOCUMENT_MAP_SCHEMA_VERSION,
+        "canonical_extraction_schema_version": CANONICAL_EXTRACTION_SCHEMA_VERSION,
+        "document_map_prompt_version": DOCUMENT_MAP_PROMPT_VERSION,
+        "formal_items_prompt_version": CLINICAL_PROMPT_VERSION,
+        "document_map_prompt_hash": document_map_prompt_hash,
+        "formal_items_prompt_hash": formal_items_prompt_hash,
         "jobs": [window.model_dump() for window in windows],
         "planned_outputs": list(CANONICAL_OUTPUTS),
         "created_at_utc": datetime.now(UTC).isoformat(),
@@ -213,7 +223,10 @@ def _request_with_checkpoint(
     )
     try:
         validated, raw, usage = gateway.request_structured(
-            remote=remote, prompt=prompt, model=model
+            remote=remote,
+            prompt=prompt,
+            model=model,
+            source_id=compatibility["source_id"],
         )
     except GeminiError:
         _write_checkpoint(
@@ -243,7 +256,8 @@ def _compatibility_context(
     *,
     registration: PdfRegistration,
     model_config: Any,
-    prompt_hash: str,
+    document_map_prompt_hash: str,
+    formal_items_prompt_hash: str,
     pages_per_job: int,
     overlap_pages: int,
 ) -> dict[str, Any]:
@@ -257,9 +271,12 @@ def _compatibility_context(
         "model_id": model_config.model_id,
         "model_config": model_value,
         "model_config_sha256": model_hash,
-        "prompt_version": CLINICAL_PROMPT_VERSION,
-        "prompt_sha256": prompt_hash,
-        "schema_version": SCHEMA_VERSION,
+        "document_map_schema_version": DOCUMENT_MAP_SCHEMA_VERSION,
+        "canonical_extraction_schema_version": CANONICAL_EXTRACTION_SCHEMA_VERSION,
+        "document_map_prompt_version": DOCUMENT_MAP_PROMPT_VERSION,
+        "formal_items_prompt_version": CLINICAL_PROMPT_VERSION,
+        "document_map_prompt_hash": document_map_prompt_hash,
+        "formal_items_prompt_hash": formal_items_prompt_hash,
         "pages_per_job": pages_per_job,
         "overlap_pages": overlap_pages,
     }
@@ -269,7 +286,8 @@ def _job_prompt(base: str, source_id: str, window: PageWindow) -> str:
     return (
         f"source_id: {source_id}\nprimary pages: {window.primary_page_start}-"
         f"{window.primary_page_end}\ncontext pages: {window.context_page_start}-"
-        f"{window.context_page_end}\nschema_version: {SCHEMA_VERSION}\n"
+        f"{window.context_page_end}\nschema_version: "
+        f"{CANONICAL_EXTRACTION_SCHEMA_VERSION}\n"
         f"prompt_version: {CLINICAL_PROMPT_VERSION}\n\n{base}"
     )
 
@@ -298,17 +316,21 @@ def run_live_extraction(
     if dirty and not allow_dirty:
         raise ValueError("Live-Lauf bei Dirty Worktree gesperrt.")
     config, _ = load_model_config(root)
-    doc_prompt, _ = load_prompt(root)
+    doc_prompt, document_map_prompt_hash = load_prompt(root)
     clinical_prompt, clinical_prompt_hash = _load_extraction_prompt(root)
     compatibility = _compatibility_context(
-        registration=registration, model_config=config, prompt_hash=clinical_prompt_hash,
+        registration=registration,
+        model_config=config,
+        document_map_prompt_hash=document_map_prompt_hash,
+        formal_items_prompt_hash=clinical_prompt_hash,
         pages_per_job=pages_per_job, overlap_pages=overlap_pages,
     )
     if resume_run_dir is None:
         timestamp = now().astimezone(UTC).strftime("%Y%m%dT%H%M%S%fZ")
         run_id = (
             f"extract-{timestamp}-{source_id}-{registration.sha256[:8]}-"
-            f"{CLINICAL_PROMPT_VERSION}-{clinical_prompt_hash[:8]}-{SCHEMA_VERSION}"
+            f"{CLINICAL_PROMPT_VERSION}-{clinical_prompt_hash[:8]}-"
+            f"{CANONICAL_EXTRACTION_SCHEMA_VERSION}"
         )
         run_dir = output / run_id
         run_dir.mkdir(parents=True, exist_ok=False)

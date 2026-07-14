@@ -22,6 +22,7 @@ class FakeGateway:
     uploads = 0
     deletes = 0
     requested_models: ClassVar[list] = []
+    requested_prompts: ClassVar[list[str]] = []
 
     def __init__(self, **kwargs) -> None:
         self.last_remote_metadata = RemoteFileMetadata(
@@ -34,6 +35,7 @@ class FakeGateway:
 
     def request_structured(self, *, model, prompt: str, **kwargs):
         type(self).requested_models.append(model)
+        type(self).requested_prompts.append(prompt)
         if model is DocumentMap:
             value = DocumentMap(
                 schema_version="document_map_v1",
@@ -75,6 +77,7 @@ def test_live_pipeline_reuses_one_upload_and_writes_outputs(
 ) -> None:
     FakeGateway.uploads = FakeGateway.deletes = 0
     FakeGateway.requested_models = []
+    FakeGateway.requested_prompts = []
     monkeypatch.setattr(pipeline, "git_metadata", lambda root: ("a" * 40, "test", False))
     status, run_dir = pipeline.run_live_extraction(
         pdf_path=synthetic_pdf,
@@ -99,10 +102,15 @@ def test_live_pipeline_reuses_one_upload_and_writes_outputs(
             "context_page_start": 1,
             "context_page_end": 2,
     }
-    assert checkpoint["compatibility"]["prompt_version"] == (
+    assert checkpoint["compatibility"]["formal_items_prompt_version"] == (
         "gemini_formal_items_comments_v2"
     )
-    assert checkpoint["compatibility"]["schema_version"] == "canonical_extraction_v2"
+    assert checkpoint["compatibility"]["document_map_schema_version"] == "document_map_v1"
+    assert checkpoint["compatibility"]["canonical_extraction_schema_version"] == (
+        "canonical_extraction_v2"
+    )
+    assert "Do not extract or reproduce complete recommendation" in FakeGateway.requested_prompts[0]
+    assert "prompt_version = gemini_formal_items_comments_v2" in FakeGateway.requested_prompts[1]
     formal = json.loads((run_dir / "formal_items.jsonl").read_text(encoding="utf-8"))
     assert formal["exact_original_text"] == "Exakter synthetischer Originaltext."
     assert (run_dir / "review_findings.xlsx").is_file()
@@ -113,13 +121,17 @@ def test_resume_does_not_repeat_successful_clinical_window(
 ) -> None:
     FakeGateway.uploads = FakeGateway.deletes = 0
     FakeGateway.requested_models = []
+    FakeGateway.requested_prompts = []
     registration = register_pdf(synthetic_pdf, worker_id="worker", source_id="SOURCE")
     fixed_now = datetime(2026, 7, 14, 12, 30, tzinfo=UTC)
     prompt, prompt_hash = pipeline._load_extraction_prompt(Path.cwd())
     del prompt
     config, _ = load_model_config(Path.cwd())
+    _document_map_prompt, document_map_prompt_hash = pipeline.load_prompt(Path.cwd())
     compatibility = pipeline._compatibility_context(
-        registration=registration, model_config=config, prompt_hash=prompt_hash,
+        registration=registration, model_config=config,
+        document_map_prompt_hash=document_map_prompt_hash,
+        formal_items_prompt_hash=prompt_hash,
         pages_per_job=8, overlap_pages=1,
     )
     run_id = (
@@ -169,8 +181,12 @@ def test_checkpoint_is_rejected_when_any_compatibility_field_differs(tmp_path: P
         "source_id": "SOURCE", "pdf_sha256": "a" * 64,
         "model_id": "gemini-3.5-flash", "model_config": {"thinking_level": "medium"},
         "model_config_sha256": "b" * 64,
-        "prompt_version": "gemini_formal_items_comments_v2",
-        "prompt_sha256": "c" * 64, "schema_version": "canonical_extraction_v2",
+        "document_map_schema_version": "document_map_v1",
+        "canonical_extraction_schema_version": "canonical_extraction_v2",
+        "document_map_prompt_version": "gemini_document_map_v1",
+        "formal_items_prompt_version": "gemini_formal_items_comments_v2",
+        "document_map_prompt_hash": "c" * 64,
+        "formal_items_prompt_hash": "d" * 64,
         "pages_per_job": 8, "overlap_pages": 1,
     }
     (tmp_path / f"{job_id}.json").write_text(
@@ -180,3 +196,11 @@ def test_checkpoint_is_rejected_when_any_compatibility_field_differs(tmp_path: P
     for field in expected:
         mismatch = {**expected, field: f"different-{field}"}
         assert pipeline.checkpoint_complete(tmp_path, job_id, mismatch) is False
+    swapped = {
+        **expected,
+        "document_map_schema_version": expected["canonical_extraction_schema_version"],
+        "canonical_extraction_schema_version": expected["document_map_schema_version"],
+        "document_map_prompt_hash": expected["formal_items_prompt_hash"],
+        "formal_items_prompt_hash": expected["document_map_prompt_hash"],
+    }
+    assert pipeline.checkpoint_complete(tmp_path, job_id, swapped) is False

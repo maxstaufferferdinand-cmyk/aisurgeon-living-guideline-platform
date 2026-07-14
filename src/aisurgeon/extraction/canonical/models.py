@@ -4,7 +4,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-SCHEMA_VERSION = "canonical_extraction_v2"
+CANONICAL_EXTRACTION_SCHEMA_VERSION = "canonical_extraction_v2"
+SCHEMA_VERSION = CANONICAL_EXTRACTION_SCHEMA_VERSION
 SUPPORTED_SCHEMA_VERSIONS = Literal["canonical_extraction_v1", "canonical_extraction_v2"]
 NormalizedItemFamily = Literal[
     "recommendation",
@@ -133,14 +134,20 @@ class UnresolvedLink(StrictModel):
 
 
 class ExtractionBatch(StrictModel):
+    schema_version: Literal["canonical_extraction_v2"] = CANONICAL_EXTRACTION_SCHEMA_VERSION
+    source_id: str | None = None
     formal_items: list[FormalItem] = Field(default_factory=list)
     comments: list[Comment] = Field(default_factory=list)
     clinical_context_blocks: list[ClinicalContextBlock] = Field(default_factory=list)
 
 
 class ReferenceBatch(StrictModel):
+    schema_version: Literal["canonical_extraction_v2"] = CANONICAL_EXTRACTION_SCHEMA_VERSION
+    source_id: str | None = None
     references: list[Reference] = Field(default_factory=list)
 
 
 class VisualObjectBatch(StrictModel):
+    schema_version: Literal["canonical_extraction_v2"] = CANONICAL_EXTRACTION_SCHEMA_VERSION
+    source_id: str | None = None
     visual_objects: list[VisualObject] = Field(default_factory=list)
