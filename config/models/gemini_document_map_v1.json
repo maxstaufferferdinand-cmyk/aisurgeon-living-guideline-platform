@@ -1,0 +1,11 @@
+{
+  "provider": "google",
+  "api": "interactions",
+  "model_id": "gemini-3.5-flash",
+  "thinking_level": "medium",
+  "media_resolution": "high",
+  "prompt_version": "gemini_document_map_v1",
+  "schema_version": "document_map_v1",
+  "request_timeout_seconds": 180,
+  "max_attempts": 3
+}

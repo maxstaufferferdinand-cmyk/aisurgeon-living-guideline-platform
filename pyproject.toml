@@ -9,8 +9,10 @@ description = "Source-bound infrastructure for the AISurgeon Living Guideline Pl
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+  "google-genai>=2.3,<3",
   "pydantic>=2.11,<3",
   "pydantic-settings>=2.10,<3",
+  "pypdf>=6.0,<7",
   "typer>=0.16,<1",
 ]
 
@@ -37,4 +39,3 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
-

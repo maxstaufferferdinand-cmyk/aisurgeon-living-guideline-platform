@@ -1,0 +1,360 @@
+{
+  "$defs": {
+    "InventoryObject": {
+      "additionalProperties": false,
+      "description": "Provisional visual-object inventory entry, never a stable domain identity.",
+      "properties": {
+        "provisional_object_id": {
+          "minLength": 1,
+          "title": "Provisional Object Id",
+          "type": "string"
+        },
+        "object_type": {
+          "enum": [
+            "table",
+            "algorithm",
+            "decision_tree"
+          ],
+          "title": "Object Type",
+          "type": "string"
+        },
+        "title_or_caption": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Title Or Caption"
+        },
+        "page_start": {
+          "title": "Page Start",
+          "type": "integer"
+        },
+        "page_end": {
+          "title": "Page End",
+          "type": "integer"
+        },
+        "source_anchor_description": {
+          "minLength": 1,
+          "title": "Source Anchor Description",
+          "type": "string"
+        },
+        "extraction_confidence": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Extraction Confidence",
+          "type": "number"
+        },
+        "review_required": {
+          "title": "Review Required",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "provisional_object_id",
+        "object_type",
+        "page_start",
+        "page_end",
+        "source_anchor_description",
+        "extraction_confidence",
+        "review_required"
+      ],
+      "title": "InventoryObject",
+      "type": "object"
+    },
+    "PageRange": {
+      "additionalProperties": false,
+      "description": "Inclusive, one-based page range.",
+      "properties": {
+        "page_start": {
+          "title": "Page Start",
+          "type": "integer"
+        },
+        "page_end": {
+          "title": "Page End",
+          "type": "integer"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        }
+      },
+      "required": [
+        "page_start",
+        "page_end"
+      ],
+      "title": "PageRange",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "PDF-adaptive structural map; this is not recommendation extraction.",
+  "properties": {
+    "schema_version": {
+      "const": "document_map_v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "source_id": {
+      "minLength": 1,
+      "title": "Source Id",
+      "type": "string"
+    },
+    "document_title": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Document Title"
+    },
+    "issuing_organization": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Issuing Organization"
+    },
+    "guideline_identifier": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Guideline Identifier"
+    },
+    "guideline_class": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Guideline Class"
+    },
+    "language": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Language"
+    },
+    "publication_year": {
+      "anyOf": [
+        {
+          "maximum": 2200,
+          "minimum": 1900,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Publication Year"
+    },
+    "version_text": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Version Text"
+    },
+    "validity_status": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Validity Status"
+    },
+    "declared_page_count": {
+      "minimum": 1,
+      "title": "Declared Page Count",
+      "type": "integer"
+    },
+    "detected_document_layout": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Detected Document Layout"
+    },
+    "column_layout": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Column Layout"
+    },
+    "recurring_header_footer_description": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Recurring Header Footer Description"
+    },
+    "front_matter_page_ranges": {
+      "items": {
+        "$ref": "#/$defs/PageRange"
+      },
+      "title": "Front Matter Page Ranges",
+      "type": "array"
+    },
+    "table_of_contents_page_ranges": {
+      "items": {
+        "$ref": "#/$defs/PageRange"
+      },
+      "title": "Table Of Contents Page Ranges",
+      "type": "array"
+    },
+    "clinical_main_body_page_ranges": {
+      "items": {
+        "$ref": "#/$defs/PageRange"
+      },
+      "title": "Clinical Main Body Page Ranges",
+      "type": "array"
+    },
+    "bibliography_page_ranges": {
+      "items": {
+        "$ref": "#/$defs/PageRange"
+      },
+      "title": "Bibliography Page Ranges",
+      "type": "array"
+    },
+    "appendix_page_ranges": {
+      "items": {
+        "$ref": "#/$defs/PageRange"
+      },
+      "title": "Appendix Page Ranges",
+      "type": "array"
+    },
+    "recommendation_or_statement_patterns": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Recommendation Or Statement Patterns",
+      "type": "array"
+    },
+    "comment_or_rationale_patterns": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Comment Or Rationale Patterns",
+      "type": "array"
+    },
+    "native_grading_systems": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Native Grading Systems",
+      "type": "array"
+    },
+    "detected_formal_item_types": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Detected Formal Item Types",
+      "type": "array"
+    },
+    "detected_table_inventory": {
+      "items": {
+        "$ref": "#/$defs/InventoryObject"
+      },
+      "title": "Detected Table Inventory",
+      "type": "array"
+    },
+    "detected_algorithm_inventory": {
+      "items": {
+        "$ref": "#/$defs/InventoryObject"
+      },
+      "title": "Detected Algorithm Inventory",
+      "type": "array"
+    },
+    "detected_decision_tree_inventory": {
+      "items": {
+        "$ref": "#/$defs/InventoryObject"
+      },
+      "title": "Detected Decision Tree Inventory",
+      "type": "array"
+    },
+    "uncertain_regions": {
+      "items": {
+        "$ref": "#/$defs/PageRange"
+      },
+      "title": "Uncertain Regions",
+      "type": "array"
+    },
+    "warnings": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Warnings",
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema_version",
+    "source_id",
+    "declared_page_count"
+  ],
+  "title": "DocumentMap",
+  "type": "object"
+}

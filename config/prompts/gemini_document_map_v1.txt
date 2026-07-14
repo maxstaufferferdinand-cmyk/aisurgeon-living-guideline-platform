@@ -1,0 +1,13 @@
+Examine the entire PDF as a visual and structural document and return only the requested
+DocumentMap JSON object. Do not extract or reproduce complete recommendation or statement texts.
+
+Map front matter, table of contents, summaries and “what is new” sections, the clinical main body,
+bibliography, and appendices separately. Explicitly identify multi-column layouts, recurring
+headers and footers, page ranges, and uncertain regions. Inventory formal recommendations and
+statements only as patterns and source-native item types. Describe native grading and consensus
+systems faithfully; do not infer missing grades or values. Inventory tables, algorithms, and
+decision trees without recreating or interpreting them.
+
+Use null or empty lists for unknown information. Never invent content or final stable
+recommendation IDs. Report uncertainty and warnings explicitly. All pages are one-based. Output
+only data conforming to the supplied schema and use the supplied source_id unchanged.

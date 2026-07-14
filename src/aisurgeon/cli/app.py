@@ -10,6 +10,13 @@ from pydantic import ValidationError
 
 from aisurgeon import __version__
 from aisurgeon.config.settings import SERVICE_FIELDS, Settings
+from aisurgeon.extraction.gemini.document_map import (
+    ensure_output_outside_repository,
+    find_project_root,
+    run_document_map,
+)
+from aisurgeon.extraction.gemini.errors import GeminiConfigurationError
+from aisurgeon.extraction.pdf_registration import PdfRegistrationError, register_pdf
 
 app = typer.Typer(
     name="aisurgeon",
@@ -58,6 +65,42 @@ def _show_path(label: str, path: Path | None, *, writable: bool = False) -> bool
     state, valid = _path_state(path, writable=writable)
     typer.echo(f"{label}: {path if path is not None else 'fehlt'} ({state})")
     return valid
+
+
+@app.command("pdf-register")
+def pdf_register(
+    pdf: Annotated[Path, typer.Option("--pdf", help="Local PDF to register without modifying it.")],
+    env_file: EnvFileOption = None,
+    output_dir: Annotated[Path | None, typer.Option("--output-dir")] = None,
+    source_id: Annotated[str | None, typer.Option("--source-id")] = None,
+) -> None:
+    """Register deterministic local PDF metadata without semantic extraction."""
+    settings = _load_settings(env_file)
+    if settings.worker_id is None:
+        typer.echo("Worker-ID fehlt.", err=True)
+        raise typer.Exit(2)
+    try:
+        registration = register_pdf(pdf, worker_id=settings.worker_id, source_id=source_id)
+        if output_dir is not None:
+            root = find_project_root()
+            target_dir = ensure_output_outside_repository(output_dir, root)
+            target_dir.mkdir(parents=True, exist_ok=True)
+            target = target_dir / "pdf_registration.json"
+            if target.exists():
+                typer.echo("Ausgabedatei existiert bereits; nichts überschrieben.", err=True)
+                raise typer.Exit(3)
+            target.write_text(registration.model_dump_json(indent=2) + "\n", encoding="utf-8")
+            typer.echo(f"Registrierung geschrieben: {target}")
+        typer.echo(f"source_id: {registration.source_id}")
+        typer.echo(f"SHA-256: {registration.sha256}")
+        typer.echo(f"Seitenzahl: {registration.page_count or 'nicht verfügbar'}")
+        typer.echo(f"Verschlüsselt: {'ja' if registration.encrypted else 'nein'}")
+    except PdfRegistrationError as exc:
+        typer.echo(f"PDF-Registrierung fehlgeschlagen: {exc}", err=True)
+        raise typer.Exit(3) from exc
+    except GeminiConfigurationError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(2) from exc
 
 
 @app.command("config-check")
@@ -190,6 +233,51 @@ def setup_local(
             else "Vorhandene env-Datei blieb unverändert."
         )
         typer.echo(message)
+
+
+@app.command("gemini-document-map")
+def gemini_document_map(
+    pdf: Annotated[Path, typer.Option("--pdf", help="Local PDF for the document-map run.")],
+    env_file: EnvFileOption = None,
+    source_id: Annotated[str | None, typer.Option("--source-id")] = None,
+    output_root: Annotated[Path | None, typer.Option("--output-root")] = None,
+    allow_dirty: Annotated[bool, typer.Option("--allow-dirty")] = False,
+    keep_remote_file: Annotated[bool, typer.Option("--keep-remote-file")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+) -> None:
+    """Plan or execute the isolated Gemini PDF document-map smoke test."""
+    settings = _load_settings(env_file)
+    if settings.worker_id is None:
+        typer.echo("Worker-ID fehlt.", err=True)
+        raise typer.Exit(2)
+    selected_output = output_root or settings.runs_dir
+    if selected_output is None:
+        typer.echo("Output-Root beziehungsweise AISURGEON_RUNS_DIR fehlt.", err=True)
+        raise typer.Exit(2)
+    try:
+        manifest, run_dir = run_document_map(
+            pdf_path=pdf,
+            worker_id=settings.worker_id,
+            output_root=selected_output,
+            api_key=settings.gemini_api_key,
+            source_id=source_id,
+            dry_run=dry_run,
+            allow_dirty=allow_dirty,
+            keep_remote_file=keep_remote_file,
+        )
+    except (GeminiConfigurationError, PdfRegistrationError) as exc:
+        typer.echo(f"Gemini-Dokumentkarte nicht gestartet: {exc}", err=True)
+        raise typer.Exit(2) from exc
+    typer.echo(f"Run-ID: {manifest.run_id}")
+    typer.echo(f"Status: {manifest.status}")
+    typer.echo(f"Run-Verzeichnis: {run_dir}")
+    typer.echo(f"Modell: {manifest.model_id}")
+    typer.echo(f"Thinking Level: {manifest.thinking_level}")
+    typer.echo(f"Media Resolution: {manifest.media_resolution}")
+    if dry_run:
+        typer.echo("Dry Run: kein Upload und kein Gemini-API-Aufruf ausgeführt.")
+    elif manifest.status != "succeeded":
+        raise typer.Exit(4)
 
 
 if __name__ == "__main__":

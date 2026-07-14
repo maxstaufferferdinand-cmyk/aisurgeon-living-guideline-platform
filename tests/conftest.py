@@ -1,6 +1,7 @@
 """Test isolation from all real AISurgeon environment variables."""
 
 import pytest
+from pypdf import PdfWriter
 
 
 @pytest.fixture(autouse=True)
@@ -20,3 +21,14 @@ def isolate_aisurgeon_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     ):
         monkeypatch.delenv(name, raising=False)
 
+
+@pytest.fixture
+def synthetic_pdf(tmp_path):
+    """Create a tiny synthetic PDF without using any guideline fixture."""
+    path = tmp_path / "synthetic.pdf"
+    writer = PdfWriter()
+    writer.add_blank_page(width=72, height=72)
+    writer.add_blank_page(width=72, height=72)
+    with path.open("wb") as stream:
+        writer.write(stream)
+    return path

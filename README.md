@@ -5,9 +5,10 @@ reviewable living-guideline workflows.
 
 ## Current status
 
-This repository is in the scaffold phase. It provides typed local configuration, setup and
-configuration-check commands, and package boundaries. PDF extraction, clinical logic, evidence
-search, synthesis, databases, web APIs, MCP, and document generation are **not implemented**.
+This repository is in the Gemini PDF smoke-test phase. It provides typed local configuration,
+deterministic technical PDF registration, and a Gemini document-map boundary. A real Gemini pilot
+has not yet been run or validated. Full recommendation extraction, clinical logic, evidence search,
+synthesis, databases, web APIs, MCP, and document generation are **not implemented**.
 
 ## Binding architecture and roles
 
@@ -114,8 +115,36 @@ scaffold phase. Credential values are never printed.
 - Do not independently modify central framework files on the second laptop.
 - External API calls are outside this scaffold phase.
 
+## PDF registration and Gemini document-map smoke test
+
+Register a local PDF without changing it or performing semantic extraction:
+
+```bash
+uv run aisurgeon pdf-register \
+  --pdf /path/to/guideline.pdf \
+  --env-file /path/to/local/.env \
+  --output-dir /path/outside/the/repository/registration
+```
+
+Plan a document-map run without uploading the PDF or calling Gemini:
+
+```bash
+uv run aisurgeon gemini-document-map \
+  --pdf /path/to/guideline.pdf \
+  --env-file /path/to/local/.env \
+  --output-root /path/outside/the/repository/runs \
+  --dry-run
+```
+
+The later live command uses the same arguments without `--dry-run`. Live execution requires a
+clean Git worktree unless `--allow-dirty` is explicitly supplied. Uploaded Gemini files are deleted
+best effort by default; `--keep-remote-file` is an explicit exception for controlled debugging.
+Never place PDFs, run outputs, or credentials in Git. See
+[Gemini PDF smoke-test architecture](docs/architecture/gemini_pdf_smoke_test.md).
+
 ## Planned, not implemented
 
-Native Gemini PDF extraction, Source Lock, targeted repair, PubMed retrieval, evidence mapping,
-recommendation-level synthesis, review workbooks, deterministic DOCX generation, PostgreSQL,
-Redis, FastAPI, MCP, and deployment infrastructure remain planned work after the pilot gates.
+Full recommendation and comment extraction, Source Lock, targeted repair, PubMed retrieval,
+evidence mapping, recommendation-level synthesis, review workbooks, deterministic DOCX generation,
+PostgreSQL, Redis, FastAPI, MCP, and deployment infrastructure remain planned work after the pilot
+gates.
