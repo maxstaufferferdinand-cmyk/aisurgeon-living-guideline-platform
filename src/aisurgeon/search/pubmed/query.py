@@ -6,12 +6,10 @@ from datetime import date
 
 from aisurgeon.search.pubmed.models import PubMedQuery, SearchUnit
 
-QUERY_BUILDER_VERSION = "pubmed_query_builder_v2"
+QUERY_BUILDER_VERSION = "pubmed_query_builder_v3"
 HUMANS_FILTER = "NOT (animals[mh] NOT humans[mh])"
 EVIDENCE_TYPE_FILTER = (
-    '("Randomized Controlled Trial"[pt] OR "Meta-Analysis"[pt] OR "Systematic Review"[pt]'
-    ' OR "Clinical Trial"[pt] OR "Observational Study"[pt] OR "Comparative Study"[pt]'
-    ' OR "Evaluation Study"[pt] OR "Validation Study"[pt])'
+    '("Randomized Controlled Trial"[pt] OR "Meta-Analysis"[pt] OR "Systematic Review"[pt])'
 )
 EXCLUSION_FILTER = 'NOT ("Practice Guideline"[pt] OR "Guideline"[pt])'
 

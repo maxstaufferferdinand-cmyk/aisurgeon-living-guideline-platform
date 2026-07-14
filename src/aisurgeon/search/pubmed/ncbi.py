@@ -349,6 +349,7 @@ def fetch_pubmed(
     if expected_end_date is not None and expected_end_date != query_end:
         raise ValueError("--end-date does not match the immutable PubMed queries")
     fingerprint = {
+        "source_id": queries[0]["source_id"],
         "input_search_run": str(input_run.resolve()),
         "queries_sha256": file_hash(query_path),
         "search_manifest_sha256": file_hash(search_manifest_path),

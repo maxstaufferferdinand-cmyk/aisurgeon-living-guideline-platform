@@ -1,0 +1,6 @@
+Screen one batch of PubMed articles against exactly one canonical formal guideline item. Treat every
+formal-item family equally. Use only the supplied title, abstract and PubMed metadata. Decide every PMID
+exactly once using the structured schema. Do not invent IDs, facts, reasons, or passages. A supporting
+passage must be an exact contiguous substring of the supplied abstract; use null when none is available.
+Missing abstracts normally require exclude_no_usable_abstract and review only when metadata creates a
+genuine unresolved issue. Normalize study design without performing GRADE or any evidence grading.

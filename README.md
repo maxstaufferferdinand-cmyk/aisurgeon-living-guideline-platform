@@ -9,7 +9,8 @@ This repository now contains the tested foundations for canonical, verbatim guid
 typed source objects, deterministic page-window planning, IDs, reference/review logic, and safe
 outputs build on the Phase-3 PDF registration and Gemini boundary. The completed GERD-v2 extraction
 is the immutable input for this phase. GPT search planning and mocked NCBI retrieval are implemented, but no live
-OpenAI or PubMed run has been validated. Update decisions, GPT synthesis, Source Lock, targeted repair,
+OpenAI or PubMed run has been validated. Deterministic candidate generation and mocked abstract
+mapping are implemented. Update decisions, GPT synthesis, Source Lock, targeted repair,
 databases, web APIs, MCP, and document generation are **not implemented**.
 
 ## Binding architecture and roles
@@ -171,9 +172,26 @@ that Search run cannot be fetched. On fetch, `--limit N` caps PMIDs per query an
 repository-root `.env` works as `--env-file ".env"`; it is never loaded automatically. See
 [PubMed search and fetch architecture](docs/architecture/pubmed_search_and_fetch.md).
 
+## Complete run through final abstract mapping
+
+From a completed canonical extraction, one command creates Search, Fetch, and final mapping runs:
+
+```bash
+uv run aisurgeon run-to-mapping \
+  --extraction-run "/path/to/completed-GERD-extraction-run" \
+  --output-root "/path/outside/repository/runs" \
+  --env-file "/path/to/local/.env" \
+  --start-date 2023-01-01 --end-date 2026-07-14 \
+  --mapping-batch-size 10
+```
+
+Recommendations, statements, consensus statements, expert consensus, and other canonical
+FormalItems are mapped without priority. Every candidate decision is retained, including
+exclusions. See [mapping architecture](docs/architecture/pubmed_evidence_mapping.md).
+
 ## Planned, not implemented
 
-Live-pilot validation, Source Lock, targeted repair, evidence mapping,
+Live-pilot validation, Source Lock, targeted repair, evidence synthesis,
 recommendation-level synthesis, deterministic DOCX generation,
 PostgreSQL, Redis, FastAPI, MCP, and deployment infrastructure remain planned work after the pilot
 gates.

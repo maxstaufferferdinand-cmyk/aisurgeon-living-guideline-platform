@@ -19,6 +19,8 @@ from aisurgeon.extraction.gemini.document_map import (
 )
 from aisurgeon.extraction.gemini.errors import GeminiConfigurationError
 from aisurgeon.extraction.pdf_registration import PdfRegistrationError, register_pdf
+from aisurgeon.mapping.pubmed import map_pubmed_evidence
+from aisurgeon.orchestration.pubmed_mapping import run_to_mapping as orchestrate_to_mapping
 from aisurgeon.search.pubmed.generation import generate_searches
 from aisurgeon.search.pubmed.ncbi import fetch_pubmed
 
@@ -437,6 +439,89 @@ def fetch_pubmed_command(
         typer.echo(f"PubMed-Abruf fehlgeschlagen: {exc}", err=True)
         raise typer.Exit(4) from exc
     typer.echo(f"PubMed-Fetch-Run-Verzeichnis: {run_dir}")
+
+
+@app.command("map-pubmed-evidence")
+def map_pubmed_evidence_command(
+    extraction_run: Annotated[Path, typer.Option("--extraction-run")],
+    search_run: Annotated[Path, typer.Option("--search-run")],
+    fetch_run: Annotated[Path, typer.Option("--fetch-run")],
+    output_root: Annotated[Path, typer.Option("--output-root")],
+    env_file: EnvFileOption = None,
+    resume_run: Annotated[Path | None, typer.Option("--resume-run")] = None,
+    batch_size: Annotated[int, typer.Option("--batch-size", min=1)] = 10,
+    limit: Annotated[int | None, typer.Option("--limit", min=1)] = None,
+    retain_narrative_reviews_as_context: Annotated[
+        bool, typer.Option("--retain-narrative-reviews-as-context")
+    ] = False,
+) -> None:
+    """Map fetched PubMed abstracts to every canonical FormalItem."""
+    settings = _load_settings(env_file)
+    if not settings.worker_id or settings.openai_api_key is None:
+        typer.echo("Worker-ID oder OPENAI_API_KEY fehlt.", err=True)
+        raise typer.Exit(2)
+    try:
+        run_dir = map_pubmed_evidence(
+            extraction_run=extraction_run,
+            search_run=search_run,
+            fetch_run=fetch_run,
+            output_root=output_root,
+            worker_id=settings.worker_id,
+            api_key=settings.openai_api_key,
+            resume_run=resume_run,
+            batch_size=batch_size,
+            limit=limit,
+            retain_narrative_reviews=retain_narrative_reviews_as_context,
+        )
+    except (ValueError, FileExistsError, RuntimeError) as exc:
+        typer.echo(f"PubMed-Mapping fehlgeschlagen: {exc}", err=True)
+        raise typer.Exit(4) from exc
+    typer.echo(f"Mapping-Run-Verzeichnis: {run_dir}")
+
+
+@app.command("run-to-mapping")
+def run_to_mapping_command(
+    extraction_run: Annotated[Path, typer.Option("--extraction-run")],
+    output_root: Annotated[Path, typer.Option("--output-root")],
+    env_file: EnvFileOption = None,
+    start_date: Annotated[str, typer.Option("--start-date")] = "2023-01-01",
+    end_date: Annotated[str | None, typer.Option("--end-date")] = None,
+    mapping_batch_size: Annotated[int, typer.Option("--mapping-batch-size", min=1)] = 10,
+    resume_run: Annotated[Path | None, typer.Option("--resume-run")] = None,
+    limit: Annotated[int | None, typer.Option("--limit", min=1)] = None,
+    retain_narrative_reviews_as_context: Annotated[
+        bool, typer.Option("--retain-narrative-reviews-as-context")
+    ] = False,
+) -> None:
+    """Run GPT search planning, NCBI fetch, and final abstract mapping."""
+    settings = _load_settings(env_file)
+    if not settings.worker_id or settings.openai_api_key is None or settings.ncbi_email is None:
+        typer.echo("Worker-ID, OPENAI_API_KEY oder NCBI_EMAIL fehlt.", err=True)
+        raise typer.Exit(2)
+    try:
+        run_dir = orchestrate_to_mapping(
+            extraction_run=extraction_run,
+            output_root=output_root,
+            worker_id=settings.worker_id,
+            openai_api_key=settings.openai_api_key,
+            ncbi_email=settings.ncbi_email,
+            ncbi_api_key=settings.ncbi_api_key,
+            ncbi_tool=settings.ncbi_tool or "aisurgeon",
+            start_date=date.fromisoformat(start_date),
+            end_date=date.fromisoformat(end_date) if end_date else date.today(),
+            mapping_batch_size=mapping_batch_size,
+            resume_run=resume_run,
+            limit=limit,
+            retain_narrative_reviews=retain_narrative_reviews_as_context,
+        )
+    except (ValueError, FileExistsError, RuntimeError) as exc:
+        typer.echo(f"Orchestrierung fehlgeschlagen: {exc}", err=True)
+        raise typer.Exit(4) from exc
+    manifest = __import__("json").loads((run_dir / "orchestration_manifest.json").read_text())
+    typer.echo(f"Orchestrierungs-Run: {run_dir}")
+    for name, path in manifest["run_paths"].items():
+        typer.echo(f"{name.capitalize()}-Run: {path}")
+    typer.echo(f"Status: {manifest['status']}")
 
 
 if __name__ == "__main__":

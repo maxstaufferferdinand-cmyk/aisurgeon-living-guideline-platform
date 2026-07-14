@@ -14,10 +14,10 @@ candidates, and Boolean grouping. It cannot set stable IDs, dates, Humans filter
 types, exclusions, pagination, API parameters, or rate limits. Python creates stable IDs and adds
 these versioned filters deterministically.
 
-The evidence filter always includes randomized controlled trials, meta-analyses, and systematic
-reviews. It also retains clinical trials and observational, comparative, evaluation, and validation
-studies so diagnostic, prognostic, safety, and rare-disease questions are not inadvertently reduced
-to RCT-only evidence. Guidelines and Practice Guidelines remain excluded as new primary evidence.
+The regular evidence filter is intentionally strict: randomized controlled trials, meta-analyses,
+and systematic reviews only. General clinical trials and observational, comparative, evaluation,
+and validation studies are not part of the complete primary-evidence workflow. Guidelines and
+Practice Guidelines remain excluded.
 
 `formal_item_search_coverage.jsonl` contains one row per FormalItem. Missing coverage is a hard
 failure. A non-literature-relevant item remains visible with an explicit exclusion reason.

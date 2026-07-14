@@ -16,9 +16,7 @@ def query_record(query_id: str, unit_id: str, formal_id: str, core: str) -> dict
     date_filter = '("2023/01/01"[Date - Publication] : "2026/07/14"[Date - Publication])'
     humans = "NOT (animals[mh] NOT humans[mh])"
     evidence = (
-        '("Randomized Controlled Trial"[pt] OR "Meta-Analysis"[pt] OR "Systematic Review"[pt]'
-        ' OR "Clinical Trial"[pt] OR "Observational Study"[pt] OR "Comparative Study"[pt]'
-        ' OR "Evaluation Study"[pt] OR "Validation Study"[pt])'
+        '("Randomized Controlled Trial"[pt] OR "Meta-Analysis"[pt] OR "Systematic Review"[pt])'
     )
     exclusion = 'NOT ("Practice Guideline"[pt] OR "Guideline"[pt])'
     return {
@@ -123,6 +121,8 @@ def test_python_adds_technical_filters() -> None:
     assert "2023/01/01" in query.date_filter
     assert "animals[mh] NOT humans[mh]" in query.humans_filter
     assert "Systematic Review" in query.evidence_type_filter
+    assert "Observational Study" not in query.evidence_type_filter
+    assert "Comparative Study" not in query.evidence_type_filter
     assert "Practice Guideline" in query.exclusion_filter
 
 
