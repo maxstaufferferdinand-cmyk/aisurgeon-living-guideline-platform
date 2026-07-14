@@ -1,0 +1,4 @@
+Read only the specified bibliography pages of the original PDF. Extract each numbered reference
+with its complete exact original text, joining its own wrapped lines without merging two references.
+Preserve the original reference number, spelling, punctuation, and page anchor. Do not invent or
+supplement DOI, PMID, or other bibliographic data. Output only the supplied structured schema.

@@ -7,11 +7,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from pydantic import SecretStr, ValidationError
+from pydantic import BaseModel, SecretStr, ValidationError
 
 from aisurgeon.extraction.gemini.errors import (
     GeminiAuthenticationError,
     GeminiError,
+    GeminiFileProcessingError,
     GeminiRateLimitError,
     GeminiResponseValidationError,
     GeminiTransientError,
@@ -86,6 +87,61 @@ class GeminiDocumentMapClient:
                 self._sleep(float(2 ** (attempt - 1)))
         raise last_error or GeminiError("Gemini-Anfrage fehlgeschlagen.")
 
+    @staticmethod
+    def request_schema(model: type[BaseModel]) -> dict[str, Any]:
+        """Return a Gemini-compatible schema while local validation stays strict."""
+        unsupported = {"default", "examples", "title", "additionalProperties"}
+
+        def clean(value: Any) -> Any:
+            if isinstance(value, dict):
+                result = {key: clean(item) for key, item in value.items() if key not in unsupported}
+                if "const" in result:
+                    result["enum"] = [result.pop("const")]
+                return result
+            if isinstance(value, list):
+                return [clean(item) for item in value]
+            return value
+
+        return clean(model.model_json_schema())
+
+    @staticmethod
+    def normalize_usage(usage: Any) -> dict[str, int] | None:
+        """Copy only documented numeric usage counters into audit data."""
+        names = (
+            "total_tokens",
+            "total_input_tokens",
+            "total_output_tokens",
+            "total_thought_tokens",
+            "total_cached_tokens",
+        )
+        if usage is None:
+            return None
+        source = (
+            usage
+            if isinstance(usage, dict)
+            else {name: getattr(usage, name, None) for name in names}
+        )
+        normalized = {name: value for name in names if isinstance((value := source.get(name)), int)}
+        return normalized or None
+
+    def wait_until_active(self, remote: Any) -> Any:
+        """Poll an uploaded file with bounded attempts; never wait indefinitely."""
+        name = getattr(remote, "name", None)
+        current = remote
+        for attempt in range(1, self._model_config.max_attempts + 1):
+            state = str(getattr(current, "state", "")).upper().split(".")[-1]
+            if state == "ACTIVE":
+                return current
+            if state == "FAILED":
+                raise GeminiFileProcessingError("Gemini konnte die PDF-Datei nicht verarbeiten.")
+            if state != "PROCESSING":
+                raise GeminiFileProcessingError("Unbekannter Gemini-Dateistatus.")
+            if attempt == self._model_config.max_attempts:
+                break
+            self._sleep(float(2 ** (attempt - 1)))
+            current = self._with_retry(lambda: self._client.files.get(name=name))
+        raise GeminiFileProcessingError("Gemini-Dateiverarbeitung hat das Zeitlimit überschritten.")
+
     def create_document_map(
         self,
         *,
@@ -104,6 +160,7 @@ class GeminiDocumentMapClient:
                     config={"mime_type": "application/pdf"},
                 )
             )
+            remote = self.wait_until_active(remote)
             metadata = RemoteFileMetadata(
                 remote_file_name=getattr(remote, "name", None),
                 uri=getattr(remote, "uri", None),
@@ -130,7 +187,7 @@ class GeminiDocumentMapClient:
                     response_format={
                         "type": "text",
                         "mime_type": "application/json",
-                        "schema": DocumentMap.model_json_schema(),
+                        "schema": self.request_schema(DocumentMap),
                     },
                     store=False,
                 )
@@ -144,8 +201,7 @@ class GeminiDocumentMapClient:
                 raise GeminiResponseValidationError(
                     "Gemini-Dokumentkarte entspricht nicht dem Schema."
                 ) from exc
-            usage = getattr(response, "usage", None)
-            token_usage = usage if isinstance(usage, dict) else None
+            token_usage = self.normalize_usage(getattr(response, "usage", None))
             return GeminiDocumentMapResult(
                 document_map=document_map,
                 raw_json=raw_json,

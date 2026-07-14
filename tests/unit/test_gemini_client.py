@@ -75,6 +75,7 @@ class FakeFiles:
         self.upload_failures = list(upload_failures or [])
         self.upload_calls = 0
         self.deleted: list[str] = []
+        self.get_states: list[str] = []
 
     def upload(self, **kwargs):
         self.upload_calls += 1
@@ -90,6 +91,12 @@ class FakeFiles:
 
     def delete(self, *, name: str) -> None:
         self.deleted.append(name)
+
+    def get(self, *, name: str):
+        state = self.get_states.pop(0)
+        return SimpleNamespace(
+            name=name, uri="mock://files/mock-pdf", mime_type="application/pdf", state=state
+        )
 
 
 class FakeInteractions:
@@ -232,3 +239,36 @@ def test_api_key_not_present_in_safe_exception(synthetic_pdf: Path) -> None:
     assert "PREFIX_dummy" not in rendered
     assert "secret_SUFFIX" not in rendered
 
+
+def test_processing_file_is_polled_until_active(synthetic_pdf: Path) -> None:
+    sdk = fake_sdk("source-test")
+    sdk.files.get_states = ["ACTIVE"]
+    original_upload = sdk.files.upload
+    sdk.files.upload = lambda **kwargs: SimpleNamespace(
+        name="files/mock-pdf",
+        uri="mock://files/mock-pdf",
+        mime_type="application/pdf",
+        state="PROCESSING",
+    )
+    sleeps: list[float] = []
+    client = GeminiDocumentMapClient(
+        api_key=SecretStr("dummy-key"), model_config=model_config(), client=sdk, sleep=sleeps.append
+    )
+    client.create_document_map(pdf_path=synthetic_pdf, prompt="prompt", source_id="source-test")
+    assert sleeps == [1.0]
+    sdk.files.upload = original_upload
+
+
+def test_request_schema_removes_defaults_and_usage_is_normalized() -> None:
+    schema = GeminiDocumentMapClient.request_schema(
+        __import__("aisurgeon.extraction.gemini.models", fromlist=["DocumentMap"]).DocumentMap
+    )
+    assert '"default"' not in json.dumps(schema)
+    usage = SimpleNamespace(
+        total_tokens=10, total_input_tokens=7, total_output_tokens=3, secret="must-not-copy"
+    )
+    assert GeminiDocumentMapClient.normalize_usage(usage) == {
+        "total_tokens": 10,
+        "total_input_tokens": 7,
+        "total_output_tokens": 3,
+    }

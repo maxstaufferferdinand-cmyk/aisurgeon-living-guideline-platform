@@ -24,3 +24,6 @@ class GeminiResponseValidationError(GeminiError):
 class GeminiConfigurationError(GeminiError):
     """Versioned Gemini configuration is missing or invalid."""
 
+
+class GeminiFileProcessingError(GeminiError):
+    """The uploaded PDF did not become usable within the bounded poll window."""

@@ -5,10 +5,11 @@ reviewable living-guideline workflows.
 
 ## Current status
 
-This repository is in the Gemini PDF smoke-test phase. It provides typed local configuration,
-deterministic technical PDF registration, and a Gemini document-map boundary. A real Gemini pilot
-has not yet been run or validated. Full recommendation extraction, clinical logic, evidence search,
-synthesis, databases, web APIs, MCP, and document generation are **not implemented**.
+This repository now contains the tested foundations for canonical, verbatim guideline extraction:
+typed source objects, deterministic page-window planning, IDs, reference/review logic, and safe
+outputs build on the Phase-3 PDF registration and Gemini boundary. A real Gemini pilot has not yet
+been run or validated. PubMed, update decisions, GPT synthesis, Source Lock, targeted repair,
+databases, web APIs, MCP, and document generation are **not implemented**.
 
 ## Binding architecture and roles
 
@@ -144,7 +145,24 @@ Never place PDFs, run outputs, or credentials in Git. See
 
 ## Planned, not implemented
 
-Full recommendation and comment extraction, Source Lock, targeted repair, PubMed retrieval,
-evidence mapping, recommendation-level synthesis, review workbooks, deterministic DOCX generation,
+Live-pilot validation, Source Lock, targeted repair, PubMed retrieval,
+evidence mapping, recommendation-level synthesis, deterministic DOCX generation,
 PostgreSQL, Redis, FastAPI, MCP, and deployment infrastructure remain planned work after the pilot
 gates.
+
+## Canonical extraction dry run
+
+Plan the canonical jobs without uploading a PDF or calling Gemini:
+
+```bash
+uv run aisurgeon extract-guideline \
+  --pdf /path/to/synthetic-or-guideline.pdf \
+  --source-id <confirmed-source-id> \
+  --output-root /path/outside/the/repository/runs \
+  --env-file /path/to/local/.env \
+  --pages-per-job 8 --overlap-pages 1 --dry-run
+```
+
+See [canonical PDF extraction](docs/architecture/canonical_pdf_extraction.md). Canonical source
+text is never summarized, paraphrased, or spelling-corrected. The GERD/EoE document is only the
+planned first two-column live pilot; this README does not claim that live extraction succeeded.

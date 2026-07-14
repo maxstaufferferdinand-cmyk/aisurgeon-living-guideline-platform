@@ -1,0 +1,3 @@
+Visually inventory original tables, algorithms, and decision trees on the specified PDF pages.
+Preserve source captions and anchors. Do not recreate, summarize, interpret, or relabel an object as
+an alleged original. Mark uncertain object types for review and output only the supplied schema.

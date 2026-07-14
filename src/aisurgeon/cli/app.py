@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from aisurgeon import __version__
 from aisurgeon.config.settings import SERVICE_FIELDS, Settings
+from aisurgeon.extraction.canonical.pipeline import prepare_dry_run, run_live_extraction
 from aisurgeon.extraction.gemini.document_map import (
     ensure_output_outside_repository,
     find_project_root,
@@ -120,8 +121,7 @@ def config_check(
     typer.echo(f"Worker-ID: {settings.worker_id or 'fehlt'}")
 
     missing_local = any(
-        value is None
-        for value in (settings.worker_id, settings.data_root, settings.pdf_source_dir)
+        value is None for value in (settings.worker_id, settings.data_root, settings.pdf_source_dir)
     )
     path_results = [
         _show_path("Datenwurzel", settings.data_root, writable=True),
@@ -278,6 +278,61 @@ def gemini_document_map(
         typer.echo("Dry Run: kein Upload und kein Gemini-API-Aufruf ausgeführt.")
     elif manifest.status != "succeeded":
         raise typer.Exit(4)
+
+
+@app.command("extract-guideline")
+def extract_guideline(
+    pdf: Annotated[Path, typer.Option("--pdf")],
+    source_id: Annotated[str, typer.Option("--source-id")],
+    output_root: Annotated[Path, typer.Option("--output-root")],
+    env_file: EnvFileOption = None,
+    pages_per_job: Annotated[int, typer.Option("--pages-per-job", min=1)] = 8,
+    overlap_pages: Annotated[int, typer.Option("--overlap-pages", min=0)] = 1,
+    allow_dirty: Annotated[bool, typer.Option("--allow-dirty")] = False,
+    keep_remote_file: Annotated[bool, typer.Option("--keep-remote-file")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+) -> None:
+    """Plan or run canonical native extraction against one remote PDF."""
+    settings = _load_settings(env_file)
+    if settings.worker_id is None:
+        typer.echo("Worker-ID fehlt.", err=True)
+        raise typer.Exit(2)
+    try:
+        if dry_run:
+            plan, run_dir = prepare_dry_run(
+                pdf_path=pdf,
+                worker_id=settings.worker_id,
+                source_id=source_id,
+                output_root=output_root,
+                pages_per_job=pages_per_job,
+                overlap_pages=overlap_pages,
+            )
+            status, job_count = plan["status"], len(plan["jobs"])
+        else:
+            if settings.gemini_api_key is None:
+                typer.echo("GEMINI_API_KEY fehlt für den Live-Lauf.", err=True)
+                raise typer.Exit(2)
+            status, run_dir = run_live_extraction(
+                pdf_path=pdf,
+                worker_id=settings.worker_id,
+                source_id=source_id,
+                output_root=output_root,
+                api_key=settings.gemini_api_key,
+                pages_per_job=pages_per_job,
+                overlap_pages=overlap_pages,
+                allow_dirty=allow_dirty,
+                keep_remote_file=keep_remote_file,
+            )
+            job_count = -1
+    except (GeminiConfigurationError, PdfRegistrationError, ValueError, FileExistsError) as exc:
+        typer.echo(f"Extraktionsplanung fehlgeschlagen: {exc}", err=True)
+        raise typer.Exit(2) from exc
+    typer.echo(f"Status: {status}")
+    if job_count >= 0:
+        typer.echo(f"Geplante Jobs: {job_count}")
+    typer.echo(f"Run-Verzeichnis: {run_dir}")
+    if dry_run:
+        typer.echo("Dry Run: kein Upload und kein Gemini-API-Aufruf ausgeführt.")
 
 
 if __name__ == "__main__":

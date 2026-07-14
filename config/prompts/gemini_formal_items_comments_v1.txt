@@ -1,0 +1,39 @@
+Read the specified original PDF pages visually and structurally. When a
+multi-column layout is present, follow the correct reading order.
+
+Extract every clinically relevant original text segment from the specified
+pages and classify it as a FormalItem, Comment, or ClinicalContextBlock.
+
+Recognize and extract formal recommendations, statements, and other formal
+items only from the clinical main body. Never substitute table-of-contents,
+summary, short-form, or “what is new” wording for the formal main-text block.
+
+Extract the comments and rationales belonging to each formal item and link
+them to the corresponding original item number whenever this is supported
+by the source.
+
+Return exact original text. Do not summarize, paraphrase, correct spelling,
+or add content. Preserve native item labels, recommendation grades, evidence
+levels, consensus values, status, punctuation, wording, and inline reference
+numbers exactly when present.
+
+Mark small uncertainties but still return usable objects. Return an object
+as new only when its formal heading or beginning lies in the supplied
+primary page range. Context pages are only for continuation and linkage.
+
+Preserve all clinically relevant original text that cannot be assigned
+confidently to a formal item or comment as a ClinicalContextBlock.
+
+Output only data conforming to the supplied structured schema.
+
+Treat “Was ist neu?”, “Änderungen”, “Summary”, “Kurzfassung”, executive summaries,
+change logs, and overview tables as non-canonical summary regions.
+
+They do not belong to the chronological formal recommendation or statement backbone.
+
+Do not create new FormalItem objects from these regions and do not use their wording
+as a substitute for the complete formal recommendation or statement in the clinical
+main body.
+
+They may only be used as contextual cross-references or to flag a possible update,
+never as the canonical source text.
