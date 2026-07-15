@@ -40,9 +40,14 @@ PMIDs are globally deduplicated. `pubmed_query_hits.jsonl` retains every query h
 unique article carries all contributing query IDs, SearchUnit IDs, and FormalItem IDs. Search and
 fetch use separate run directories and exact fingerprints; incompatible resume is rejected.
 `pubmed_esearch_results.jsonl` records count, query translation, warning list, and error list per
-successful query. Only an isolated `No items found.` warning is benign. Other warnings—including
-an `outputmessage` of `NOT`—and unsafe NCBI translations fail that query. In a complete run with
-more than one valid query, an all-zero result fails the Fetch run with
+successful query. NCBI warnings are classified before the run status is set: empty `errorlist`,
+valid `querytranslation`, consistent count/PMID structure, and phrase-not-found style warnings
+(`phrasesignored`, `quotedphrasesnotfound`, individual missing search phrases, or single-query
+`No items found.`) produce `completed_with_review`. Hard errors still include non-empty
+`errorlist`, invalid JSON, invalid PMID structures, incomplete pagination, an isolated
+`outputmessage` of `NOT`, unsafe Animals/Humans translations, and exhausted HTTP retries. Soft
+warnings are retained in `pubmed_esearch_results.jsonl`, `pubmed_fetch_warnings.jsonl`, and the
+Fetch manifest. In a complete run with more than one valid query, an all-zero result fails the Fetch run with
 `all_queries_returned_zero_hits`; consequently the orchestrator does not start mapping. A single
 zero-hit SearchUnit remains valid and documented.
 Manifests contain only credential presence, never credential values.

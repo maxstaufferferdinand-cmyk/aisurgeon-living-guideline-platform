@@ -159,7 +159,10 @@ def test_esearch_paginates_retries_and_never_places_key_in_cache(tmp_path: Path)
         start = int(params["retstart"])
         ids = [str(n) for n in range(start + 1, min(3, start + 2) + 1)] if start < 3 else []
         return HttpResponse(
-            200, json.dumps({"esearchresult": {"count": "3", "idlist": ids}}).encode()
+            200,
+            json.dumps(
+                {"esearchresult": {"count": "3", "idlist": ids, "querytranslation": "GERD"}}
+            ).encode(),
         )
 
     client = NcbiClient(
@@ -230,8 +233,102 @@ def test_invalid_live_ncbi_animals_translation_and_not_warning_are_rejected(
     )
     with pytest.raises(ESearchQueryError, match="query syntax problem") as exc_info:
         client.esearch("GERD")
-    assert exc_info.value.metadata["warninglist"] == ["NOT"]
+    assert exc_info.value.metadata["warninglist"] == {"outputmessage": ["NOT"]}
     assert exc_info.value.metadata["querytranslation"] == translation
+
+
+def test_esearch_phrase_not_found_warning_is_completed_with_review(tmp_path: Path) -> None:
+    def transport(*args):
+        return HttpResponse(
+            200,
+            json.dumps(
+                {
+                    "esearchresult": {
+                        "count": "2",
+                        "idlist": ["10", "11"],
+                        "querytranslation": "GERD",
+                        "warninglist": {"quotedphrasesnotfound": ['"GERD chest pain"[tiab]']},
+                        "errorlist": {},
+                    }
+                }
+            ).encode(),
+        )
+
+    client = NcbiClient(
+        email=SecretStr("x@y.test"),
+        api_key=None,
+        tool="test",
+        cache_dir=tmp_path,
+        transport=transport,
+        sleep=lambda _: None,
+    )
+    result = client.esearch("GERD")
+    assert result["status"] == "completed_with_review"
+    assert result["pmids"] == ["10", "11"]
+    assert result["soft_warnings"] == [
+        {"category": "quotedphrasesnotfound", "message": '"GERD chest pain"[tiab]'}
+    ]
+
+
+def test_esearch_phrase_not_found_zero_hits_is_review_not_failed(tmp_path: Path) -> None:
+    def transport(*args):
+        return HttpResponse(
+            200,
+            json.dumps(
+                {
+                    "esearchresult": {
+                        "count": "0",
+                        "idlist": [],
+                        "querytranslation": "GERD",
+                        "warninglist": {"quotedphrasesnotfound": ['"without dysplasia"[tiab]']},
+                        "errorlist": {},
+                    }
+                }
+            ).encode(),
+        )
+
+    client = NcbiClient(
+        email=SecretStr("x@y.test"),
+        api_key=None,
+        tool="test",
+        cache_dir=tmp_path,
+        transport=transport,
+        sleep=lambda _: None,
+    )
+    result = client.esearch("GERD")
+    assert result["status"] == "completed_with_review"
+    assert result["count"] == 0
+    assert result["pmids"] == []
+
+
+def test_esearch_non_empty_errorlist_is_failed(tmp_path: Path) -> None:
+    def transport(*args):
+        return HttpResponse(
+            200,
+            json.dumps(
+                {
+                    "esearchresult": {
+                        "count": "0",
+                        "idlist": [],
+                        "querytranslation": "GERD",
+                        "warninglist": {},
+                        "errorlist": {"phrasesnotfound": ["broken"]},
+                    }
+                }
+            ).encode(),
+        )
+
+    client = NcbiClient(
+        email=SecretStr("x@y.test"),
+        api_key=None,
+        tool="test",
+        cache_dir=tmp_path,
+        transport=transport,
+        sleep=lambda _: None,
+    )
+    with pytest.raises(ESearchQueryError, match="query syntax problem") as exc_info:
+        client.esearch("GERD")
+    assert exc_info.value.metadata["hard_errors"] == ["broken"]
 
 
 def test_xml_parser_combines_abstract_parts_collective_authors_and_missing_abstract() -> None:
@@ -346,7 +443,7 @@ def test_all_zero_gate_fails_multiple_queries_but_single_zero_is_valid(tmp_path:
         for line in (failed_run / "pubmed_esearch_results.jsonl").read_text().splitlines()
     ]
     assert esearch[0]["count"] == 0
-    assert esearch[0]["warninglist"] == ["No items found."]
+    assert esearch[0]["warninglist"] == {"messages": ["No items found."]}
 
     single = tmp_path / "single-search"
     single.mkdir()
@@ -365,8 +462,14 @@ def test_all_zero_gate_fails_multiple_queries_but_single_zero_is_valid(tmp_path:
         client_factory=factory,
     )
     assert (
-        json.loads((single_run / "pubmed_fetch_manifest.json").read_text())["status"] == "completed"
+        json.loads((single_run / "pubmed_fetch_manifest.json").read_text())["status"]
+        == "completed_with_review"
     )
+    warnings = [
+        json.loads(line)
+        for line in (single_run / "pubmed_fetch_warnings.jsonl").read_text().splitlines()
+    ]
+    assert warnings[0]["message"] == "No items found."
 
 
 def test_fetch_resume_requires_identical_fingerprint(tmp_path: Path) -> None:
@@ -391,6 +494,126 @@ def test_fetch_resume_requires_identical_fingerprint(tmp_path: Path) -> None:
             api_key=None,
             resume_run=resume,
         )
+
+
+def test_failed_fetch_resume_reclassifies_soft_warning_checkpoints_and_reuses_articles(
+    tmp_path: Path,
+) -> None:
+    search_run = tmp_path / "search"
+    search_run.mkdir()
+    queries = [
+        query_record("Q1", "U1", "F1", "one"),
+        query_record("Q2", "U2", "F2", "two"),
+        query_record("Q3", "U3", "F3", "three"),
+        query_record("Q4", "U4", "F4", "four"),
+    ]
+    (search_run / "pubmed_queries.jsonl").write_text(
+        "".join(json.dumps(query) + "\n" for query in queries), encoding="utf-8"
+    )
+    (search_run / "search_manifest.json").write_text(
+        json.dumps({"run_mode": "complete"}), encoding="utf-8"
+    )
+
+    class InitiallyHardClient:
+        def esearch(self, query, limit=None):
+            if "(one AND" in query:
+                return ["1"]
+            raise ESearchQueryError(
+                "NCBI ESearch query syntax problem: NOT",
+                {
+                    "pmids": [],
+                    "count": 0,
+                    "querytranslation": 'GERD AND ("animals"[MeSH Terms] NOT "humans"[MeSH Terms])',
+                    "warninglist": {"outputmessage": ["NOT"]},
+                    "errorlist": {},
+                },
+            )
+
+        def efetch(self, pmids):
+            return (
+                b"<PubmedArticleSet><PubmedArticle><MedlineCitation><PMID>1</PMID>"
+                b"<Article><ArticleTitle>T1</ArticleTitle></Article></MedlineCitation>"
+                b"</PubmedArticle></PubmedArticleSet>"
+            )
+
+    with pytest.raises(RuntimeError, match="esearch_query_failed"):
+        fetch_pubmed(
+            input_run=search_run,
+            output_root=tmp_path,
+            worker_id="worker",
+            email=SecretStr("owner@example.test"),
+            api_key=None,
+            client_factory=lambda **kwargs: InitiallyHardClient(),
+        )
+    failed_run = next(tmp_path.glob("pubmed-fetch-*"))
+    soft_specs = {
+        "Q2": (["2", "3"], {"quotedphrasesnotfound": ['"GERD chest pain"[tiab]']}),
+        "Q3": (["4"], {"phrasesignored": ['"Hiatal Hernia"[Mesh]']}),
+        "Q4": (["5", "6"], {"messages": ['"without dysplasia"[tiab]']}),
+    }
+    for query_id, (pmids, warninglist) in soft_specs.items():
+        query = next(item for item in queries if item["query_id"] == query_id)
+        (failed_run / "checkpoints" / f"{query_id}.json").write_text(
+            json.dumps(
+                {
+                    "status": "failed",
+                    "pmids": pmids,
+                    "count": len(pmids),
+                    "querytranslation": query["final_pubmed_query"],
+                    "warninglist": warninglist,
+                    "errorlist": {},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    efetch_batches: list[list[str]] = []
+
+    class ResumeClient:
+        def esearch(self, query, limit=None):
+            raise AssertionError("ESearch should be reused from checkpoints")
+
+        def efetch(self, pmids):
+            efetch_batches.append(list(pmids))
+            records = "".join(
+                f"<PubmedArticle><MedlineCitation><PMID>{pmid}</PMID><Article>"
+                f"<ArticleTitle>T{pmid}</ArticleTitle></Article></MedlineCitation></PubmedArticle>"
+                for pmid in pmids
+            )
+            return f"<PubmedArticleSet>{records}</PubmedArticleSet>".encode()
+
+    resumed = fetch_pubmed(
+        input_run=search_run,
+        output_root=tmp_path,
+        worker_id="worker",
+        email=SecretStr("owner@example.test"),
+        api_key=None,
+        resume_run=failed_run,
+        client_factory=lambda **kwargs: ResumeClient(),
+    )
+    manifest = json.loads((resumed / "pubmed_fetch_manifest.json").read_text())
+    assert manifest["status"] == "completed_with_review"
+    assert manifest["summary"]["warning_queries"] == 3
+    assert all(
+        json.loads((resumed / "checkpoints" / f"{query_id}.json").read_text())["status"]
+        == "completed_with_review"
+        for query_id in soft_specs
+    )
+    assert json.loads((resumed / "checkpoints" / "Q1.json").read_text())["status"] == "completed"
+    assert efetch_batches and "1" not in {pmid for batch in efetch_batches for pmid in batch}
+    articles = [
+        json.loads(line) for line in (resumed / "pubmed_articles.jsonl").read_text().splitlines()
+    ]
+    assert [article["pmid"] for article in articles] == ["1", "2", "3", "4", "5", "6"]
+    warnings = [
+        json.loads(line)
+        for line in (resumed / "pubmed_fetch_warnings.jsonl").read_text().splitlines()
+    ]
+    assert {warning["message"] for warning in warnings} == {
+        '"GERD chest pain"[tiab]',
+        '"Hiatal Hernia"[Mesh]',
+        '"without dysplasia"[tiab]',
+    }
 
 
 def test_search_generation_is_mocked_resumable_and_covers_every_item(tmp_path: Path) -> None:

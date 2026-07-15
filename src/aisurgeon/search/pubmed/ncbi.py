@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 import time
 import urllib.error
 import urllib.parse
@@ -69,6 +70,20 @@ class ESearchQueryError(RuntimeError):
         self.metadata = metadata
 
 
+def _normalize_message_map(value: Any) -> dict[str, list[str]]:
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        normalized: dict[str, list[str]] = {}
+        for key, item in value.items():
+            messages = _messages(item)
+            if messages:
+                normalized[str(key)] = list(dict.fromkeys(messages))
+        return normalized
+    messages = _messages(value)
+    return {"messages": list(dict.fromkeys(messages))} if messages else {}
+
+
 def _messages(value: Any) -> list[str]:
     if value is None:
         return []
@@ -79,6 +94,73 @@ def _messages(value: Any) -> list[str]:
     if isinstance(value, dict):
         return [message for item in value.values() for message in _messages(item)]
     return [str(value)]
+
+
+def _flatten_message_map(value: Any) -> list[str]:
+    return list(dict.fromkeys(_messages(value)))
+
+
+def _is_soft_warning(category: str, message: str) -> bool:
+    normalized_category = category.lower().replace("_", "")
+    normalized_message = message.strip()
+    if normalized_message == "No items found.":
+        return True
+    if normalized_category in {"phrasesignored", "quotedphrasesnotfound"}:
+        return True
+    return (
+        normalized_message.startswith('"')
+        and "[" in normalized_message
+        and "]" in normalized_message
+    )
+
+
+def classify_esearch_result(
+    metadata: dict[str, Any], *, limit: int | None = None
+) -> dict[str, Any]:
+    pmids = metadata.get("pmids")
+    count = metadata.get("count")
+    querytranslation = metadata.get("querytranslation")
+    warning_map = _normalize_message_map(metadata.get("warninglist"))
+    error_messages = _flatten_message_map(metadata.get("errorlist"))
+    hard_errors: list[str] = []
+    soft_warnings: list[dict[str, str]] = []
+
+    if not isinstance(pmids, list) or any(
+        not isinstance(pmid, str) or not pmid.isdigit() for pmid in pmids
+    ):
+        hard_errors.append("invalid_pmid_structure")
+    if not isinstance(count, int) or count < 0:
+        hard_errors.append("invalid_count_structure")
+    elif isinstance(pmids, list):
+        expected_count = count if limit is None else min(count, limit)
+        if len(pmids) != expected_count:
+            hard_errors.append("inconsistent_count_pmid_structure")
+    if not isinstance(querytranslation, str) or not querytranslation.strip():
+        hard_errors.append("missing_querytranslation")
+    else:
+        hard_errors.extend(validate_final_pubmed_query(querytranslation))
+    if error_messages:
+        hard_errors.extend(error_messages)
+
+    for category, messages in warning_map.items():
+        for message in messages:
+            if category.lower() in {"outputmessage", "outputmessages"} and message.strip() == "NOT":
+                hard_errors.append("ncbi_outputmessage_NOT")
+            elif _is_soft_warning(category, message):
+                soft_warnings.append({"category": category, "message": message})
+            else:
+                hard_errors.append(f"{category}: {message}")
+
+    status = (
+        "failed" if hard_errors else ("completed_with_review" if soft_warnings else "completed")
+    )
+    return {
+        "status": status,
+        "warninglist": warning_map,
+        "errorlist": list(dict.fromkeys(error_messages)),
+        "soft_warnings": soft_warnings,
+        "hard_errors": list(dict.fromkeys(hard_errors)),
+    }
 
 
 def _transport(url: str, params: dict[str, str], timeout: float) -> HttpResponse:
@@ -179,8 +261,8 @@ class NcbiClient:
         total: int | None = None
         retstart = 0
         querytranslation = ""
-        warnings: list[str] = []
-        errors: list[str] = []
+        warnings: dict[str, list[str]] = {}
+        errors: dict[str, list[str]] = {}
         while total is None or retstart < total:
             wanted = page_size if limit is None else min(page_size, limit - len(pmids))
             if wanted <= 0:
@@ -198,10 +280,15 @@ class NcbiClient:
             try:
                 result = json.loads(body)["esearchresult"]
                 total = int(result["count"])
-                page = [str(value) for value in result.get("idlist", [])]
+                idlist = result["idlist"]
+                if not isinstance(idlist, list):
+                    raise TypeError
+                page = [str(value) for value in idlist]
                 querytranslation = str(result.get("querytranslation") or querytranslation)
-                warnings.extend(_messages(result.get("warninglist")))
-                errors.extend(_messages(result.get("errorlist")))
+                for key, messages in _normalize_message_map(result.get("warninglist")).items():
+                    warnings.setdefault(key, []).extend(messages)
+                for key, messages in _normalize_message_map(result.get("errorlist")).items():
+                    errors.setdefault(key, []).extend(messages)
             except (KeyError, TypeError, ValueError, json.JSONDecodeError):
                 raise RuntimeError("NCBI ESearch returned an invalid JSON response") from None
             retstart += len(page)
@@ -221,15 +308,13 @@ class NcbiClient:
             "pmids": pmids[:limit] if limit is not None else pmids,
             "count": total or 0,
             "querytranslation": querytranslation,
-            "warninglist": list(dict.fromkeys(warnings)),
-            "errorlist": list(dict.fromkeys(errors)),
+            "warninglist": {key: list(dict.fromkeys(value)) for key, value in warnings.items()},
+            "errorlist": {key: list(dict.fromkeys(value)) for key, value in errors.items()},
         }
-        disallowed_warnings = [
-            message for message in metadata["warninglist"] if message != "No items found."
-        ]
-        translation_errors = validate_final_pubmed_query(querytranslation)
-        if metadata["errorlist"] or disallowed_warnings or translation_errors:
-            codes = [*metadata["errorlist"], *disallowed_warnings, *translation_errors]
+        classification = classify_esearch_result(metadata, limit=limit)
+        metadata.update(classification)
+        if classification["status"] == "failed":
+            codes = classification["hard_errors"]
             raise ESearchQueryError(
                 f"NCBI ESearch query syntax problem: {'; '.join(codes)}", metadata
             )
@@ -359,6 +444,35 @@ def write_articles_xlsx(path: Path, articles: list[PubMedArticle]) -> None:
     workbook.save(path)
 
 
+def _atomic_replace(path: Path, writer: Callable[[Path], None]) -> None:
+    temp = path.with_name(f".{path.stem}.tmp{path.suffix}")
+    if temp.exists():
+        temp.unlink()
+    writer(temp)
+    os.replace(temp, path)
+
+
+def _write_json_output(path: Path, value: Any, *, replace: bool) -> None:
+    if replace:
+        _atomic_replace(path, lambda temp: write_json(temp, value))
+    else:
+        write_json(path, value)
+
+
+def _write_jsonl_output(path: Path, records: list[Any], *, replace: bool) -> None:
+    if replace:
+        _atomic_replace(path, lambda temp: write_jsonl(temp, records))
+    else:
+        write_jsonl(path, records)
+
+
+def _write_xlsx_output(path: Path, articles: list[PubMedArticle], *, replace: bool) -> None:
+    if replace:
+        _atomic_replace(path, lambda temp: write_articles_xlsx(temp, articles))
+    else:
+        write_articles_xlsx(path, articles)
+
+
 def fetch_pubmed(
     *,
     input_run: Path,
@@ -410,8 +524,15 @@ def fetch_pubmed(
         run_dir = resume_run.resolve()
         if json.loads((run_dir / "checkpoint_fingerprint.json").read_text()) != fingerprint:
             raise ValueError("Resume fingerprint does not match")
-        if (run_dir / "pubmed_fetch_manifest.json").is_file():
-            return run_dir
+        replace_existing_outputs = False
+        manifest_path = run_dir / "pubmed_fetch_manifest.json"
+        if manifest_path.is_file():
+            previous_status = json.loads(manifest_path.read_text(encoding="utf-8")).get("status")
+            if previous_status in {"completed", "completed_with_review", "technical_limited"}:
+                return run_dir
+            if previous_status != "failed":
+                raise ValueError("Resume run is not in a resumable completed or failed state")
+            replace_existing_outputs = True
     else:
         external_output_root = ensure_external_run_root(output_root, input_run)
         run_dir = (
@@ -420,11 +541,12 @@ def fetch_pubmed(
         )
         run_dir.mkdir(parents=True, exist_ok=False)
         write_json(run_dir / "checkpoint_fingerprint.json", fingerprint)
+        replace_existing_outputs = False
     checkpoints, cache = run_dir / "checkpoints", run_dir / "cache"
     checkpoints.mkdir(exist_ok=True)
     client = client_factory(email=email, api_key=api_key, tool=tool, cache_dir=cache)
     provenance: dict[str, dict[str, set[str]]] = {}
-    hits, errors, query_results = [], [], []
+    hits, errors, query_results, warning_records = [], [], [], []
     for query in queries:
         checkpoint = checkpoints / f"{query['query_id']}.json"
         try:
@@ -438,23 +560,52 @@ def fetch_pubmed(
                     else {
                         "pmids": raw_result,
                         "count": len(raw_result),
-                        "querytranslation": "",
+                        "querytranslation": query["final_pubmed_query"],
                         "warninglist": [],
                         "errorlist": [],
                     }
+                )
+            previous_checkpoint_status = result.get("status")
+            classification = classify_esearch_result(result, limit=limit)
+            result.update(classification)
+            if classification["status"] == "failed":
+                raise ESearchQueryError(
+                    "NCBI ESearch query syntax problem: "
+                    + "; ".join(classification["hard_errors"]),
+                    result,
                 )
             pmids = result["pmids"]
             query_result = {
                 "query_id": query["query_id"],
                 "search_unit_id": query["search_unit_id"],
+                "status": classification["status"],
                 "count": result["count"],
                 "querytranslation": result["querytranslation"],
-                "warninglist": result["warninglist"],
-                "errorlist": result["errorlist"],
+                "warninglist": classification["warninglist"],
+                "errorlist": classification["errorlist"],
+                "soft_warnings": classification["soft_warnings"],
             }
             query_results.append(query_result)
-            if not checkpoint.exists():
-                write_json(checkpoint, {"status": "completed", **result})
+            if classification["soft_warnings"]:
+                for warning in classification["soft_warnings"]:
+                    warning_records.append(
+                        {
+                            "query_id": query["query_id"],
+                            "search_unit_id": query["search_unit_id"],
+                            "stage": "esearch",
+                            "warning_code": "ncbi_soft_warning",
+                            "category": warning["category"],
+                            "message": warning["message"],
+                            "count": result["count"],
+                            "querytranslation": result["querytranslation"],
+                        }
+                    )
+            if not checkpoint.exists() or previous_checkpoint_status != classification["status"]:
+                _write_json_output(
+                    checkpoint,
+                    {"status": classification["status"], **result},
+                    replace=checkpoint.exists(),
+                )
             for pmid in pmids:
                 hits.append(
                     {
@@ -472,10 +623,19 @@ def fetch_pubmed(
         except RuntimeError as exc:
             error = {"query_id": query["query_id"], "stage": "esearch", "error": str(exc)}
             if isinstance(exc, ESearchQueryError):
-                error["error_code"] = "esearch_query_syntax_problem"
+                error["error_code"] = "esearch_query_hard_error"
                 error.update(exc.metadata)
-                if not checkpoint.exists():
-                    write_json(checkpoint, {"status": "failed", **exc.metadata})
+                checkpoint_status = (
+                    json.loads(checkpoint.read_text()).get("status")
+                    if checkpoint.exists()
+                    else None
+                )
+                if not checkpoint.exists() or checkpoint_status == "failed":
+                    _write_json_output(
+                        checkpoint,
+                        {"status": "failed", **exc.metadata},
+                        replace=checkpoint.exists(),
+                    )
             errors.append(error)
     all_zero = (
         limit is None
@@ -491,10 +651,21 @@ def fetch_pubmed(
                 "error": "All valid PubMed queries returned zero hits",
             }
         )
-    articles_by_id: dict[str, PubMedArticle] = {}
     all_pmids = list(provenance)
-    for offset in range(0, len(all_pmids), 200):
-        batch = all_pmids[offset : offset + 200]
+    articles_by_id: dict[str, PubMedArticle] = {}
+    existing_articles_path = run_dir / "pubmed_articles.jsonl"
+    if replace_existing_outputs and existing_articles_path.is_file():
+        for row in load_jsonl(existing_articles_path):
+            article = PubMedArticle.model_validate(row)
+            if article.pmid in provenance:
+                links = provenance[article.pmid]
+                article.query_ids = sorted(links["query_ids"])
+                article.search_unit_ids = sorted(links["search_unit_ids"])
+                article.linked_formal_item_ids = sorted(links["formal_item_ids"])
+                articles_by_id[article.pmid] = article
+    missing_pmids = [pmid for pmid in all_pmids if pmid not in articles_by_id]
+    for offset in range(0, len(missing_pmids), 200):
+        batch = missing_pmids[offset : offset + 200]
         try:
             parsed = parse_pubmed_xml(client.efetch(batch), fetched_at=now().isoformat())
         except (RuntimeError, ET.ParseError) as exc:
@@ -534,37 +705,51 @@ def fetch_pubmed(
         }
         for pmid in sorted(provenance, key=int)
     ]
-    write_jsonl(run_dir / "pubmed_pmids.jsonl", pmid_records)
-    write_jsonl(run_dir / "pubmed_query_hits.jsonl", hits)
-    write_jsonl(run_dir / "pubmed_esearch_results.jsonl", query_results)
-    write_jsonl(run_dir / "pubmed_articles.jsonl", articles)
-    write_jsonl(run_dir / "pubmed_fetch_errors.jsonl", errors)
-    write_articles_xlsx(run_dir / "pubmed_articles.xlsx", articles)
+    write_replace = replace_existing_outputs
+    _write_jsonl_output(run_dir / "pubmed_pmids.jsonl", pmid_records, replace=write_replace)
+    _write_jsonl_output(run_dir / "pubmed_query_hits.jsonl", hits, replace=write_replace)
+    _write_jsonl_output(
+        run_dir / "pubmed_esearch_results.jsonl", query_results, replace=write_replace
+    )
+    _write_jsonl_output(run_dir / "pubmed_articles.jsonl", articles, replace=write_replace)
+    _write_jsonl_output(run_dir / "pubmed_fetch_errors.jsonl", errors, replace=write_replace)
+    _write_jsonl_output(
+        run_dir / "pubmed_fetch_warnings.jsonl", warning_records, replace=write_replace
+    )
+    _write_xlsx_output(run_dir / "pubmed_articles.xlsx", articles, replace=write_replace)
     fatal_fetch = all_zero or any(error.get("stage") == "esearch" for error in errors)
+    has_soft_warnings = bool(warning_records)
     summary = {
         "unique_pmids": len(provenance),
         "articles": len(articles),
         "errors": len(errors),
+        "warning_queries": len({warning["query_id"] for warning in warning_records}),
+        "warnings": len(warning_records),
         "queries_executed": len(query_results),
         "zero_hit_queries": sum(result["count"] == 0 for result in query_results),
     }
-    write_json(run_dir / "pubmed_fetch_summary.json", summary)
+    _write_json_output(run_dir / "pubmed_fetch_summary.json", summary, replace=write_replace)
     output_files = {
         path.name: file_hash(path)
         for path in run_dir.iterdir()
         if path.is_file() and path.name != "pubmed_fetch_manifest.json"
     }
-    write_json(
+    status = (
+        "failed"
+        if fatal_fetch
+        else (
+            "technical_limited"
+            if limit is not None
+            else ("completed_with_review" if has_soft_warnings else "completed")
+        )
+    )
+    _write_json_output(
         run_dir / "pubmed_fetch_manifest.json",
         {
             **fingerprint,
             "worker_id": worker_id,
             "created_at": now().isoformat(),
-            "status": (
-                "failed"
-                if fatal_fetch
-                else ("technical_limited" if limit is not None else "completed")
-            ),
+            "status": status,
             "run_mode": "technical_limited" if limit is not None else "complete",
             "limit_per_query": limit,
             "ncbi_configuration": {
@@ -575,8 +760,10 @@ def fetch_pubmed(
             "start_date": queries[0].get("start_date") if queries else None,
             "end_date": queries[0].get("end_date") if queries else None,
             "summary": summary,
+            "soft_warnings": warning_records,
             "output_files": output_files,
         },
+        replace=write_replace,
     )
     if fatal_fetch:
         code = "all_queries_returned_zero_hits" if all_zero else "esearch_query_failed"

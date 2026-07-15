@@ -211,6 +211,29 @@ def test_complete_mapping_outputs_every_item_and_pair_and_limit_is_technical(
     )
 
 
+def test_completed_with_review_fetch_is_accepted_for_mapping(tmp_path: Path) -> None:
+    extraction, search, fetch = _runs(tmp_path)
+    _json(
+        fetch / "pubmed_fetch_manifest.json",
+        {"source_id": "SRC", "status": "completed_with_review"},
+    )
+
+    class Fake:
+        def create(self, prompt, payload):
+            return {"decisions": [_decision(x["pmid"]) for x in payload["articles"]]}
+
+    run = map_pubmed_evidence(
+        extraction_run=extraction,
+        search_run=search,
+        fetch_run=fetch,
+        output_root=tmp_path,
+        worker_id="w",
+        api_key=SecretStr("secret"),
+        client_factory=lambda key, config: Fake(),
+    )
+    assert json.loads((run / "mapping_manifest.json").read_text())["status"] == "completed"
+
+
 def test_invalid_structured_response_is_retried_at_most_controlled_attempts(
     tmp_path: Path,
 ) -> None:
