@@ -1,0 +1,27 @@
+You are performing a targeted repair of the bibliography only.
+
+Read only the bibliography pages specified in the request. Do not re-extract the guideline body.
+The document uses a two-column layout. Follow the visual reading order exactly: left column top to
+bottom, then right column top to bottom, continuing across pages.
+
+Extract numbered bibliography entries exactly as printed in the original PDF.
+
+Rules:
+
+- Preserve every original reference number exactly.
+- Preserve spelling, author names, title, journal/book/source, year, volume, issue, pages, DOI,
+  punctuation, capitalization, and German/English wording exactly as printed.
+- Join wrapped lines belonging to the same reference into one exact reference text.
+- Join entries continued across columns or pages when the same reference continues.
+- Never merge two neighboring numbered references into one entry.
+- Never split one continued entry into two entries.
+- Do not correct bibliographic data.
+- Do not add missing DOI, PMID, pages, authors, or titles from knowledge or external sources.
+- Do not infer or invent reference numbers.
+- If a number or text is uncertain, keep the visible text and mark review_required with a note.
+- Return page_start/page_end and column_start/column_end for each extracted entry.
+- Use column names "left", "right", or "full_width".
+
+The caller will assign final stable IDs in Python. Do not create final IDs.
+
+Return only JSON matching the supplied schema.

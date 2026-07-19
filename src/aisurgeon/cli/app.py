@@ -24,6 +24,7 @@ from aisurgeon.orchestration.pubmed_mapping import run_to_mapping as orchestrate
 from aisurgeon.search.pubmed.generation import generate_searches
 from aisurgeon.search.pubmed.ncbi import fetch_pubmed
 from aisurgeon.synthesis.reference_rebuild import rebuild_guideline_references
+from aisurgeon.synthesis.reference_repair import run_reference_repair_and_rebuild
 from aisurgeon.synthesis.updated_guideline import build_updated_guideline
 
 app = typer.Typer(
@@ -537,6 +538,37 @@ def rebuild_guideline_references_command(
         typer.echo(f"Referenz-/DOCX-Rebuild fehlgeschlagen: {exc}", err=True)
         raise typer.Exit(4) from exc
     typer.echo(f"Reference-/DOCX-Rebuild-Run-Verzeichnis: {run_dir}")
+
+
+@app.command("repair-and-rebuild-guideline-references")
+def repair_and_rebuild_guideline_references_command(
+    pdf: Annotated[Path, typer.Option("--pdf")],
+    extraction_run: Annotated[Path, typer.Option("--extraction-run")],
+    synthesis_run: Annotated[Path, typer.Option("--synthesis-run")],
+    failed_reference_run: Annotated[Path, typer.Option("--failed-reference-run")],
+    output_root: Annotated[Path, typer.Option("--output-root")],
+    env_file: EnvFileOption = None,
+    resume_run: Annotated[Path | None, typer.Option("--resume-run")] = None,
+) -> None:
+    """Repair missing original bibliography entries, then rebuild the DOCX."""
+    settings = _load_settings(env_file)
+    if settings.gemini_api_key is None:
+        typer.echo("GEMINI_API_KEY fehlt.", err=True)
+        raise typer.Exit(2)
+    try:
+        run_dir = run_reference_repair_and_rebuild(
+            pdf=pdf,
+            extraction_run=extraction_run,
+            synthesis_run=synthesis_run,
+            failed_reference_run=failed_reference_run,
+            output_root=output_root,
+            api_key=settings.gemini_api_key,
+            resume_run=resume_run,
+        )
+    except (ValueError, FileExistsError, RuntimeError) as exc:
+        typer.echo(f"Referenz-Repair/Rebuild fehlgeschlagen: {exc}", err=True)
+        raise typer.Exit(4) from exc
+    typer.echo(f"Reference-Repair-Run-Verzeichnis: {run_dir}")
 
 
 @app.command("run-to-mapping")

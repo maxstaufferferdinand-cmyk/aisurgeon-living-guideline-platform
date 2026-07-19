@@ -538,6 +538,7 @@ def rebuild_guideline_references(
     output_root: Path,
     resume_run: Path | None = None,
     output_name: str = "AISurgeon_Aktualisierte_Leitlinie_GERD_EoE_2026_references_fixed.docx",
+    original_references_path: Path | None = None,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> Path:
     manifest_path = synthesis_run / "synthesis_manifest.json"
@@ -548,15 +549,22 @@ def rebuild_guideline_references(
         raise ValueError("Synthesis run is not completed")
     extraction_run = Path(synthesis_manifest["input_runs"][0])
     fetch_run = Path(synthesis_manifest["input_runs"][2])
-    required = {
-        synthesis_run: [
-            "updated_guideline_blocks.jsonl",
-            "synthesis_manifest.json",
-            "synthesis_summary.json",
-        ],
-        extraction_run: ["references.jsonl", "extraction_manifest.json"],
-        fetch_run: ["pubmed_articles.jsonl", "pubmed_fetch_manifest.json"],
-    }
+    original_refs_input = original_references_path or extraction_run / "references.jsonl"
+    required: dict[Path, list[str]] = {}
+    for root, names in (
+        (
+            synthesis_run,
+            [
+                "updated_guideline_blocks.jsonl",
+                "synthesis_manifest.json",
+                "synthesis_summary.json",
+            ],
+        ),
+        (extraction_run, ["extraction_manifest.json"]),
+        (original_refs_input.parent, [original_refs_input.name]),
+        (fetch_run, ["pubmed_articles.jsonl", "pubmed_fetch_manifest.json"]),
+    ):
+        required.setdefault(root, []).extend(names)
     input_hashes = {
         str((root / name).resolve()): file_hash(root / name)
         for root, names in required.items()
@@ -568,6 +576,7 @@ def rebuild_guideline_references(
         "input_synthesis_run": str(synthesis_run.resolve()),
         "input_extraction_run": str(extraction_run.resolve()),
         "input_fetch_run": str(fetch_run.resolve()),
+        "input_original_references_path": str(original_refs_input.resolve()),
         "input_file_hashes": input_hashes,
         "reference_builder_version": DUAL_REFERENCE_BUILDER_VERSION,
         "docx_rebuild_version": DOCX_REBUILD_VERSION,
@@ -590,7 +599,7 @@ def rebuild_guideline_references(
         write_json(run_dir / "checkpoint_fingerprint.json", fingerprint)
     blocks = load_jsonl(synthesis_run / "updated_guideline_blocks.jsonl")
     original_refs = sorted(
-        load_jsonl(extraction_run / "references.jsonl"),
+        load_jsonl(original_refs_input),
         key=lambda row: _reference_number(row["original_reference_number"]),
     )
     articles = load_jsonl(fetch_run / "pubmed_articles.jsonl")
