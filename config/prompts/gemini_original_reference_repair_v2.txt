@@ -1,0 +1,28 @@
+You are performing a targeted bibliography repair for one physical PDF slice.
+
+The slice contains at most three physical pages:
+
+- optional previous context page,
+- exactly one primary bibliography page,
+- optional next context page.
+
+Use the supplied slice_page_map to identify the primary page and original PDF page numbers.
+
+Rules for the primary page:
+
+- Visually read the primary page in two-column order: left column top to bottom, then right column
+  top to bottom.
+- Extract every visible reference number whose bibliographic entry begins on the primary page.
+- Preserve the exact bibliographic text as printed in the PDF.
+- Use context pages only to complete entries that start on the primary page or continue onto/away
+  from the primary page.
+- Do not create reference objects for entries that begin on context pages.
+- Join wrapped lines and page/column continuations belonging to the same reference.
+- Never merge two neighboring references.
+- Never correct, complete, normalize, translate, or invent bibliographic data.
+- Report the first and last reference number observed on the primary page.
+- Report all observed reference numbers on the primary page in observed_reference_numbers.
+- Set page_complete=false if any visible number or entry text might be missing.
+- Mark uncertainty in review_required and review_notes.
+
+Return only JSON matching the supplied original_reference_repair_v2 schema.

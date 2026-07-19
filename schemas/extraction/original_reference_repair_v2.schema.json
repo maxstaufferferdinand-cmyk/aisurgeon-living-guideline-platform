@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "OriginalReferenceRepairPageJobV2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "source_id",
+    "job_id",
+    "primary_original_pdf_page",
+    "context_original_pdf_pages",
+    "first_reference_number_observed",
+    "last_reference_number_observed",
+    "observed_reference_numbers",
+    "references",
+    "page_complete",
+    "review_required",
+    "review_notes"
+  ],
+  "properties": {
+    "schema_version": { "const": "original_reference_repair_v2" },
+    "source_id": { "type": "string", "minLength": 1 },
+    "job_id": { "type": "string", "minLength": 1 },
+    "primary_original_pdf_page": { "type": "integer", "minimum": 1 },
+    "context_original_pdf_pages": {
+      "type": "array",
+      "items": { "type": "integer", "minimum": 1 }
+    },
+    "first_reference_number_observed": { "type": ["integer", "null"], "minimum": 1 },
+    "last_reference_number_observed": { "type": ["integer", "null"], "minimum": 1 },
+    "observed_reference_numbers": {
+      "type": "array",
+      "items": { "type": "integer", "minimum": 1 }
+    },
+    "references": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "original_reference_number",
+          "exact_reference_text",
+          "page_start",
+          "page_end",
+          "column_start",
+          "column_end",
+          "continuation_from_previous_page",
+          "continuation_to_next_page",
+          "extraction_confidence",
+          "review_required",
+          "review_notes"
+        ],
+        "properties": {
+          "original_reference_number": { "type": "integer", "minimum": 1 },
+          "exact_reference_text": { "type": "string", "minLength": 1 },
+          "page_start": { "type": "integer", "minimum": 1 },
+          "page_end": { "type": "integer", "minimum": 1 },
+          "column_start": { "enum": ["left", "right", "full_width"] },
+          "column_end": { "enum": ["left", "right", "full_width"] },
+          "continuation_from_previous_page": { "type": "boolean" },
+          "continuation_to_next_page": { "type": "boolean" },
+          "extraction_confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+          "review_required": { "type": "boolean" },
+          "review_notes": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        }
+      }
+    },
+    "page_complete": { "type": "boolean" },
+    "review_required": { "type": "boolean" },
+    "review_notes": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  }
+}

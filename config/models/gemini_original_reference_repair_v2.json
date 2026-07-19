@@ -1,0 +1,11 @@
+{
+  "provider": "google",
+  "api": "generate_content",
+  "model_id": "gemini-3.5-flash",
+  "thinking_level": "medium",
+  "media_resolution": "high",
+  "repair_prompt_version": "gemini_original_reference_repair_v2",
+  "repair_schema_version": "original_reference_repair_v2",
+  "request_timeout_seconds": 1200,
+  "max_attempts": 3
+}
