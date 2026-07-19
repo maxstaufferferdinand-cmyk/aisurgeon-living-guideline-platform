@@ -8,10 +8,10 @@ reviewable living-guideline workflows.
 This repository now contains the tested foundations for canonical, verbatim guideline extraction:
 typed source objects, deterministic page-window planning, IDs, reference/review logic, and safe
 outputs build on the Phase-3 PDF registration and Gemini boundary. The completed GERD-v2 extraction
-is the immutable input for this phase. GPT search planning and mocked NCBI retrieval are implemented, but no live
-OpenAI or PubMed run has been validated. Deterministic candidate generation and mocked abstract
-mapping are implemented. Update decisions, GPT synthesis, Source Lock, targeted repair,
-databases, web APIs, MCP, and document generation are **not implemented**.
+is the immutable input for this phase. GPT search planning, NCBI retrieval, deterministic candidate
+generation, abstract mapping, item-level synthesis, reference consolidation, and deterministic DOCX
+generation are implemented with mock tests. Source Lock, targeted repair, databases, web APIs, MCP,
+and deployment infrastructure remain outside the current pilot scope.
 
 ## Binding architecture and roles
 
@@ -189,12 +189,44 @@ Recommendations, statements, consensus statements, expert consensus, and other c
 FormalItems are mapped without priority. Every candidate decision is retained, including
 exclusions. See [mapping architecture](docs/architecture/pubmed_evidence_mapping.md).
 
+## Updated guideline synthesis and DOCX
+
+From completed Extraction, Search, Fetch, and Mapping runs, one command builds item evidence
+packets, German syntheses, update decisions, consolidated references, QA artifacts, and the final
+DOCX draft:
+
+```bash
+uv run aisurgeon build-updated-guideline \
+  --extraction-run "/path/to/completed-GERD-extraction-run" \
+  --search-run "/path/to/completed-search-run" \
+  --fetch-run "/path/to/completed-fetch-run" \
+  --mapping-run "/path/to/completed-mapping-run" \
+  --output-root "/path/outside/repository/runs" \
+  --env-file "/path/to/local/.env"
+```
+
+The command accepts `--resume-run` for identical fingerprints. `--limit N` is only for technical
+tests and does not produce a complete final DOCX. The resulting DOCX is an automatically supported
+scientific update draft, not a consented AWMF guideline. See
+[synthesis and DOCX architecture](docs/architecture/updated_guideline_synthesis_and_docx.md).
+
+If an existing synthesis run must be rebuilt without changing the German syntheses, use the
+deterministic dual-namespace reference rebuild:
+
+```bash
+uv run aisurgeon rebuild-guideline-references \
+  --synthesis-run "/path/to/completed-synthesis-run" \
+  --output-root "/path/outside/repository/runs"
+```
+
+Original guideline references keep their original numeric markers (`[1]`, `[2]`, ...). New
+PubMed references are cited as `[N1]`, `[N2]`, ... and raw PMID mentions are not retained as final
+in-text citations.
+
 ## Planned, not implemented
 
-Live-pilot validation, Source Lock, targeted repair, evidence synthesis,
-recommendation-level synthesis, deterministic DOCX generation,
-PostgreSQL, Redis, FastAPI, MCP, and deployment infrastructure remain planned work after the pilot
-gates.
+Live-pilot validation, Source Lock, targeted repair, PostgreSQL, Redis, FastAPI, MCP, and
+deployment infrastructure remain planned work after the pilot gates.
 
 ## Canonical extraction dry run
 

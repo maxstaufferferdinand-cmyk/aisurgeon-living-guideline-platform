@@ -1,0 +1,14 @@
+Synthesize the new abstract-based PubMed evidence for exactly one canonical formal guideline item.
+Return only the structured schema.
+
+Use German only. Preserve the supplied original formal item text exactly unless the final decision is
+modified. Do not invent evidence, data, references, recommendation grades, consensus values, or formal
+GRADE. Ignore any numerical relevance_score values if present. Use only direct and indirect articles as
+the basis for update decisions. Context-only articles may provide background but cannot by themselves
+justify a modified item. Uncertain-review articles cannot by themselves justify any automatic text change.
+
+Allowed decisions are exactly: insufficient_new_evidence, unchanged, rationale_updated, modified.
+For unchanged, rationale_updated, and insufficient_new_evidence, updated_item_text_de must equal the
+original item text exactly. For modified, keep the change minimal and mark it as an automated update
+proposal. Report only actually used PMIDs from the supplied articles. Keep review needs and uncertainties
+separate from the public guideline wording.

@@ -23,6 +23,8 @@ from aisurgeon.mapping.pubmed import map_pubmed_evidence
 from aisurgeon.orchestration.pubmed_mapping import run_to_mapping as orchestrate_to_mapping
 from aisurgeon.search.pubmed.generation import generate_searches
 from aisurgeon.search.pubmed.ncbi import fetch_pubmed
+from aisurgeon.synthesis.reference_rebuild import rebuild_guideline_references
+from aisurgeon.synthesis.updated_guideline import build_updated_guideline
 
 app = typer.Typer(
     name="aisurgeon",
@@ -477,6 +479,64 @@ def map_pubmed_evidence_command(
         typer.echo(f"PubMed-Mapping fehlgeschlagen: {exc}", err=True)
         raise typer.Exit(4) from exc
     typer.echo(f"Mapping-Run-Verzeichnis: {run_dir}")
+
+
+@app.command("build-updated-guideline")
+def build_updated_guideline_command(
+    extraction_run: Annotated[Path, typer.Option("--extraction-run")],
+    search_run: Annotated[Path, typer.Option("--search-run")],
+    fetch_run: Annotated[Path, typer.Option("--fetch-run")],
+    mapping_run: Annotated[Path, typer.Option("--mapping-run")],
+    output_root: Annotated[Path, typer.Option("--output-root")],
+    env_file: EnvFileOption = None,
+    resume_run: Annotated[Path | None, typer.Option("--resume-run")] = None,
+    limit: Annotated[int | None, typer.Option("--limit", min=1)] = None,
+) -> None:
+    """Build synthesis, references, and final updated guideline DOCX."""
+    settings = _load_settings(env_file)
+    if not settings.worker_id or settings.openai_api_key is None:
+        typer.echo("Worker-ID oder OPENAI_API_KEY fehlt.", err=True)
+        raise typer.Exit(2)
+    try:
+        run_dir = build_updated_guideline(
+            extraction_run=extraction_run,
+            search_run=search_run,
+            fetch_run=fetch_run,
+            mapping_run=mapping_run,
+            output_root=output_root,
+            worker_id=settings.worker_id,
+            api_key=settings.openai_api_key,
+            resume_run=resume_run,
+            limit=limit,
+        )
+    except (ValueError, FileExistsError, RuntimeError) as exc:
+        typer.echo(f"Leitlinien-Synthese fehlgeschlagen: {exc}", err=True)
+        raise typer.Exit(4) from exc
+    typer.echo(f"Synthesis-/DOCX-Run-Verzeichnis: {run_dir}")
+
+
+@app.command("rebuild-guideline-references")
+def rebuild_guideline_references_command(
+    synthesis_run: Annotated[Path, typer.Option("--synthesis-run")],
+    output_root: Annotated[Path, typer.Option("--output-root")],
+    resume_run: Annotated[Path | None, typer.Option("--resume-run")] = None,
+    output_name: Annotated[
+        str,
+        typer.Option("--output-name"),
+    ] = "AISurgeon_Aktualisierte_Leitlinie_GERD_EoE_2026_references_fixed.docx",
+) -> None:
+    """Rebuild DOCX references with original and new citation namespaces."""
+    try:
+        run_dir = rebuild_guideline_references(
+            synthesis_run=synthesis_run,
+            output_root=output_root,
+            resume_run=resume_run,
+            output_name=output_name,
+        )
+    except (ValueError, FileExistsError, RuntimeError) as exc:
+        typer.echo(f"Referenz-/DOCX-Rebuild fehlgeschlagen: {exc}", err=True)
+        raise typer.Exit(4) from exc
+    typer.echo(f"Reference-/DOCX-Rebuild-Run-Verzeichnis: {run_dir}")
 
 
 @app.command("run-to-mapping")

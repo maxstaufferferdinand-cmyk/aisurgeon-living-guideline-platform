@@ -1539,16 +1539,24 @@ Keine fehlenden Leerzeichen, keine Sprachmischung.
 
 Finale DOCX:
 
-- ein konsolidiertes, numerisch fortlaufendes Literaturverzeichnis,
-- Nummerierung nach erster Nennung,
+- zwei strikt getrennte Literatur-Namensräume:
+  Originalreferenzen der Leitlinie behalten ihre ursprünglichen Nummern,
+  neue Referenzen der automatisierten Aktualisierung verwenden [N1], [N2],
+  ... nach erster Nennung in neuen Evidenz- und Schlussfolgerungstexten,
 - Zitate:
-  [1], [2-4], [5, 7],
+  [1], [2-4], [5, 7] für Originalreferenzen,
+  [N1], [N2-N4], [N1, N3] für neue Referenzen,
+- alte und neue Referenzen nicht in einer gemeinsamen numerischen Sequenz
+  mischen,
+- bei gemeinsamem Bedarf getrennte Gruppen verwenden, zum Beispiel:
+  [12, 13] [N3, N4],
+- rohe PMIDs sind keine finalen In-Text-Zitate und müssen deterministisch
+  durch Original- oder N-Referenzmarker ersetzt werden,
 - linksbündig,
 - Hanging Indent,
 - nicht im Blocksatz,
 - konsistenter bibliografischer Stil,
-- keine internen Screeninglabels,
-- keine OLD-/NEW-/N-Codes.
+- keine internen Screeninglabels.
 
 Reference Mapping separat:
 
