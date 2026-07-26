@@ -21,6 +21,7 @@ from aisurgeon.extraction.gemini.errors import GeminiConfigurationError
 from aisurgeon.extraction.pdf_registration import PdfRegistrationError, register_pdf
 from aisurgeon.extraction.provider_preflight import run_provider_preflight
 from aisurgeon.extraction.semantic_structure import run_semantic_structure
+from aisurgeon.extraction.transcription_v3.models import ExecutionMode
 from aisurgeon.extraction.transcription_v3.pipeline import run_transcription_v3
 from aisurgeon.mapping.pubmed import map_pubmed_evidence
 from aisurgeon.orchestration.guideline_v3 import run_guideline_end_to_end_v3
@@ -78,6 +79,32 @@ def _load_settings(env_file: Path | None, **overrides: object) -> Settings:
     except ValidationError as exc:
         typer.echo("Konfigurationsfehler: ungültige lokale Einstellungen.", err=True)
         raise typer.Exit(2) from exc
+
+
+def _execution_mode_from_flags(
+    *, live: bool, dry_run: bool, require_env_file: Path | None
+) -> ExecutionMode:
+    if live == dry_run:
+        typer.echo("Specify exactly one of --live or --dry-run.", err=True)
+        raise typer.Exit(2)
+    if live and require_env_file is None:
+        typer.echo("--live requires an explicit --env-file.", err=True)
+        raise typer.Exit(2)
+    return "live" if live else "dry_run"
+
+
+def _parse_page_range(value: str | None) -> tuple[int, int] | None:
+    if value is None:
+        return None
+    try:
+        start_raw, end_raw = value.split("-", maxsplit=1)
+        start = int(start_raw)
+        end = int(end_raw)
+    except ValueError as exc:
+        raise typer.BadParameter("--page-range must use START-END, for example 1-3") from exc
+    if start < 1 or end < start:
+        raise typer.BadParameter("--page-range must use positive ascending page numbers")
+    return start, end
 
 
 def _show_path(label: str, path: Path | None, *, writable: bool = False) -> bool:
@@ -358,11 +385,16 @@ def extract_guideline(
 @app.command("provider-preflight")
 def provider_preflight(
     env_file: EnvFileOption = None,
+    live: Annotated[bool, typer.Option("--live")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
     gemini: Annotated[bool, typer.Option("--gemini/--no-gemini")] = True,
     openai: Annotated[bool, typer.Option("--openai/--no-openai")] = True,
     ncbi: Annotated[bool, typer.Option("--ncbi/--no-ncbi")] = True,
 ) -> None:
-    """Run secret-free provider preflight checks; provider calls are mocked here."""
+    """Run secret-free provider preflight checks in an explicit execution mode."""
+    execution_mode = _execution_mode_from_flags(
+        live=live, dry_run=dry_run, require_env_file=env_file
+    )
     settings = _load_settings(env_file)
     providers = set()
     if gemini:
@@ -373,6 +405,7 @@ def provider_preflight(
         providers.add("ncbi")
     report = run_provider_preflight(
         providers=providers,
+        execution_mode=execution_mode,
         gemini_api_key=settings.gemini_api_key,
         openai_api_key=settings.openai_api_key,
         ncbi_api_key=settings.ncbi_api_key,
@@ -390,10 +423,16 @@ def transcribe_guideline(
     resume_run: Annotated[Path | None, typer.Option("--resume-run")] = None,
     planner_mode: Annotated[str, typer.Option("--planner-mode")] = "deterministic",
     gemini_concurrency: Annotated[int, typer.Option("--gemini-concurrency", min=1, max=4)] = 1,
+    live: Annotated[bool, typer.Option("--live")] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
     limit: Annotated[int | None, typer.Option("--limit", min=1)] = None,
+    page_range: Annotated[str | None, typer.Option("--page-range")] = None,
+    max_jobs: Annotated[int | None, typer.Option("--max-jobs", min=1)] = None,
 ) -> None:
-    """Run canonical Gemini transcription v3; dry run performs no provider call."""
+    """Run canonical Gemini transcription v3 in live or dry-run mode."""
+    execution_mode = _execution_mode_from_flags(
+        live=live, dry_run=dry_run, require_env_file=env_file
+    )
     settings = _load_settings(env_file)
     if settings.worker_id is None:
         typer.echo("Worker-ID fehlt.", err=True)
@@ -406,8 +445,11 @@ def transcribe_guideline(
             output_root=output_root,
             planner_mode=planner_mode,
             gemini_concurrency=gemini_concurrency,
-            dry_run=dry_run,
+            execution_mode=execution_mode,
+            api_key=settings.gemini_api_key,
             limit=limit,
+            page_range=_parse_page_range(page_range),
+            max_jobs=max_jobs,
             resume_run=resume_run,
         )
     except (ValueError, FileExistsError) as exc:
@@ -423,9 +465,14 @@ def structure_guideline(
     output_root: Annotated[Path, typer.Option("--output-root")],
     env_file: EnvFileOption = None,
     resume_run: Annotated[Path | None, typer.Option("--resume-run")] = None,
+    live: Annotated[bool, typer.Option("--live")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
     limit: Annotated[int | None, typer.Option("--limit", min=1)] = None,
 ) -> None:
     """Run GPT semantic structuring from canonical transcript only."""
+    execution_mode = _execution_mode_from_flags(
+        live=live, dry_run=dry_run, require_env_file=env_file
+    )
     settings = _load_settings(env_file)
     if settings.worker_id is None:
         typer.echo("Worker-ID fehlt.", err=True)
@@ -436,6 +483,7 @@ def structure_guideline(
             output_root=output_root,
             worker_id=settings.worker_id,
             api_key=settings.openai_api_key,
+            execution_mode=execution_mode,
             resume_run=resume_run,
             limit=limit,
         )
@@ -456,10 +504,16 @@ def run_guideline_end_to_end_v3_command(
     end_date: Annotated[str | None, typer.Option("--end-date")] = None,
     planner_mode: Annotated[str, typer.Option("--planner-mode")] = "deterministic",
     gemini_concurrency: Annotated[int, typer.Option("--gemini-concurrency", min=1, max=4)] = 1,
+    live: Annotated[bool, typer.Option("--live")] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
     limit: Annotated[int | None, typer.Option("--limit", min=1)] = None,
+    page_range: Annotated[str | None, typer.Option("--page-range")] = None,
+    max_jobs: Annotated[int | None, typer.Option("--max-jobs", min=1)] = None,
 ) -> None:
-    """Run the versioned v3 guideline pipeline with mocked providers in dry/test paths."""
+    """Run the versioned v3 guideline pipeline in explicit live or dry-run mode."""
+    execution_mode = _execution_mode_from_flags(
+        live=live, dry_run=dry_run, require_env_file=env_file
+    )
     settings = _load_settings(env_file)
     if settings.worker_id is None:
         typer.echo("Worker-ID fehlt.", err=True)
@@ -476,8 +530,11 @@ def run_guideline_end_to_end_v3_command(
             end_date_override=end_date,
             planner_mode=planner_mode,
             gemini_concurrency=gemini_concurrency,
-            dry_run=dry_run,
+            execution_mode=execution_mode,
             limit=limit,
+            page_range=_parse_page_range(page_range),
+            max_jobs=max_jobs,
+            gemini_api_key=settings.gemini_api_key,
             openai_api_key=settings.openai_api_key,
         )
     except (ValueError, FileExistsError) as exc:

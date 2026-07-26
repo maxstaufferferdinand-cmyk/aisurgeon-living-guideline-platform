@@ -8,6 +8,7 @@ CANONICAL_TRANSCRIPTION_SCHEMA_VERSION = "canonical_transcription_v3"
 TRANSCRIPTION_PROMPT_VERSION = "gemini_source_transcription_v3"
 SCOUT_SCHEMA_VERSION = "extraction_scout_v1"
 SCOUT_PROMPT_VERSION = "gemini_technical_layout_scout_v1"
+ExecutionMode = Literal["live", "dry_run", "mock_test"]
 
 VisualBlockType = Literal[
     "heading",
@@ -99,6 +100,7 @@ class SourceContentDraft(StrictModel):
     continuation_to_next_page: bool = False
     unreadable_regions: list[str] = Field(default_factory=list)
     visual_uncertainties: list[str] = Field(default_factory=list)
+    page_complete: bool = True
 
 
 class SourceContent(SourceContentDraft):
@@ -135,3 +137,28 @@ class CompletenessFinding(StrictModel):
     page_number: int | None = None
     job_id: str | None = None
     repair_required: bool = False
+
+
+class ProviderCallEvidence(StrictModel):
+    provider_backend: str
+    stage: Literal["scout", "transcription"]
+    job_id: str | None = None
+    attempt: int = 1
+    success: bool
+    request_id: str | None = None
+    response_id: str | None = None
+    token_usage: dict[str, int] | None = None
+    finish_reason: str | None = None
+    duration_seconds: float
+    http_status: int | None = None
+    api_status: str | None = None
+    calculated_delay_seconds: float | None = None
+    retry_after_seconds: float | None = None
+    final_failure_category: str | None = None
+    pdf_slice_hash: str | None = None
+    prompt_hash: str | None = None
+    safe_error_class: str | None = None
+    safe_error_message: str | None = None
+    uploaded_file_name: str | None = None
+    uploaded_file_uri_present: bool = False
+    remote_file_deleted: bool | None = None

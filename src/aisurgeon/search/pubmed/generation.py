@@ -40,6 +40,11 @@ def derive_start_date_from_extraction_manifest(
     if not manifest_path.is_file():
         raise ValueError("extraction_manifest.json is required to derive PubMed start date")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if manifest.get("status") is not None and manifest.get("status") not in {
+        "completed",
+        "completed_with_review",
+    }:
+        raise ValueError("PubMed start date requires a complete live structure run")
     year = manifest.get("publication_year")
     if not isinstance(year, int) or year < 1900 or year > 2200:
         document_map_path = input_run.resolve() / "document_map.validated.json"

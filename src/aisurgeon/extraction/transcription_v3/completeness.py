@@ -6,17 +6,26 @@ from collections.abc import Iterable
 from aisurgeon.extraction.pdf_preflight import PdfPagePreflight
 from aisurgeon.extraction.transcription_v3.models import (
     CompletenessFinding,
+    ExecutionMode,
+    ProviderCallEvidence,
     SourceContent,
     TranscriptionJob,
 )
 
 
 def _finding(
-    code: str, message: str, *, page: int | None = None, job: str | None = None
+    code: str,
+    message: str,
+    *,
+    page: int | None = None,
+    job: str | None = None,
+    critical: bool = False,
 ) -> CompletenessFinding:
     digest = hashlib.sha256(f"{code}|{page}|{job}|{message}".encode()).hexdigest()[:12]
     severity = (
-        "error" if code.startswith("missing") or code == "finish_reason_truncated" else "warning"
+        "error"
+        if critical or code.startswith("missing") or code == "finish_reason_truncated"
+        else "warning"
     )
     return CompletenessFinding(
         finding_id=f"TX3_FINDING_{digest}",
@@ -34,6 +43,8 @@ def validate_transcription_completeness(
     jobs: list[TranscriptionJob],
     contents: Iterable[SourceContent],
     page_preflight: list[PdfPagePreflight],
+    execution_mode: ExecutionMode = "mock_test",
+    provider_evidence: list[ProviderCallEvidence] | None = None,
     finish_reasons: dict[str, str | None] | None = None,
     output_ceiling_jobs: set[str] | None = None,
 ) -> list[CompletenessFinding]:
@@ -41,6 +52,11 @@ def validate_transcription_completeness(
     expected = {page for job in jobs for page in job.primary_pages}
     by_page: dict[int, list[SourceContent]] = {}
     by_job = {content.job_id: content for content in contents}
+    successful_jobs = {
+        evidence.job_id
+        for evidence in provider_evidence or []
+        if evidence.stage == "transcription" and evidence.success and evidence.job_id
+    }
     for content in by_job.values():
         for page in content.represented_original_pdf_pages:
             by_page.setdefault(page, []).append(content)
@@ -54,6 +70,15 @@ def validate_transcription_completeness(
         content = by_job.get(job.job_id)
         if content is None:
             continue
+        if execution_mode == "live" and job.job_id not in successful_jobs:
+            findings.append(
+                _finding(
+                    "missing_provider_evidence",
+                    "Live primary pages require successful Gemini response evidence.",
+                    job=job.job_id,
+                    critical=True,
+                )
+            )
         order = [block.reading_order_index for block in content.visual_blocks]
         if order != sorted(order):
             findings.append(
@@ -79,8 +104,32 @@ def validate_transcription_completeness(
                     "implausibly_short_output",
                     "Output is short relative to local text layer.",
                     job=job.job_id,
+                    critical=execution_mode == "live",
                 )
             )
+        for primary_page in job.primary_pages:
+            page_text_len = sum(
+                len(block.exact_visible_text.strip())
+                for block in content.visual_blocks
+                if block.page_number == primary_page
+            )
+            preflight = preflight_by_page.get(primary_page)
+            if (
+                execution_mode == "live"
+                and preflight is not None
+                and not preflight.obvious_blank_page
+                and not preflight.image_heavy
+                and page_text_len == 0
+            ):
+                findings.append(
+                    _finding(
+                        "empty_nonblank_primary_page",
+                        "Live nonblank primary page has no source text.",
+                        page=primary_page,
+                        job=job.job_id,
+                        critical=True,
+                    )
+                )
         truncated = {"MAX_TOKENS", "LENGTH", "TRUNCATED"}
         if finish_reasons and finish_reasons.get(job.job_id) in truncated:
             findings.append(

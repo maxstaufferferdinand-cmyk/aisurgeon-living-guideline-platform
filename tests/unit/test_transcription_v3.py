@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from aisurgeon.extraction.pdf_preflight import PdfPagePreflight, PdfPreflight
 from aisurgeon.extraction.provider_preflight import run_provider_preflight
 from aisurgeon.extraction.semantic_structure import (
+    OpenAISemanticStructureProvider,
     SemanticStructureDraft,
     build_semantic_payload,
     derive_pubmed_start_date,
@@ -21,12 +22,15 @@ from aisurgeon.extraction.transcription_v3.completeness import (
 )
 from aisurgeon.extraction.transcription_v3.models import (
     ExtractionScout,
+    ExtractionScoutDraft,
     ExtractionScoutRegion,
+    ProviderCallEvidence,
     SourceContentDraft,
     TranscriptionJob,
     VisualBlock,
 )
 from aisurgeon.extraction.transcription_v3.pipeline import (
+    GeminiTranscriptionProvider,
     inject_source_content_metadata,
     run_transcription_v3,
 )
@@ -208,7 +212,7 @@ def test_transcription_resume_preserves_successful_jobs(
         worker_id="worker",
         output_root=output_root,
     )
-    assert status == "completed"
+    assert status == "mock_test"
     job_manifest = next((run_dir / "transcription_jobs").glob("*/job_manifest.json"))
     before = job_manifest.read_text(encoding="utf-8")
     status, _ = run_transcription_v3(
@@ -218,7 +222,7 @@ def test_transcription_resume_preserves_successful_jobs(
         output_root=output_root,
         resume_run=run_dir,
     )
-    assert status == "completed"
+    assert status == "mock_test"
     assert job_manifest.read_text(encoding="utf-8") == before
     raw = next((run_dir / "transcription_jobs").glob("*/raw_response.json"))
     assert raw.is_file()
@@ -344,7 +348,9 @@ def test_pubmed_publication_year_defaults_and_overrides_are_audited(tmp_path: Pa
 def test_provider_preflight_and_manifests_are_secret_free(
     tmp_path: Path, synthetic_pdf: Path
 ) -> None:
-    report = run_provider_preflight(providers={"gemini", "openai", "ncbi"})
+    report = run_provider_preflight(
+        providers={"gemini", "openai", "ncbi"}, execution_mode="mock_test"
+    )
     encoded = report.model_dump_json()
     assert "sk-" not in encoded and "AIza" not in encoded
     _, tx_run = run_transcription_v3(
@@ -376,10 +382,416 @@ def test_orchestrator_does_not_call_late_reference_repair_and_limit_blocks_docx(
         output_root=tmp_path / "runs",
         worker_id="worker",
     )
-    assert (complete / "synthetic_final_guideline.docx").is_file()
+    complete_manifest = json.loads(
+        (complete / "orchestration_manifest.json").read_text(encoding="utf-8")
+    )
+    assert complete_manifest["execution_mode"] == "mock_test"
+    assert complete_manifest["final_docx_produced"] is False
+
+
+class _FakeGeminiProvider:
+    provider_backend = "google_genai"
+
+    def __init__(
+        self, *, fail_transcription: bool = False, omit_transcription_evidence: bool = False
+    ):
+        self.fail_transcription = fail_transcription
+        self.omit_transcription_evidence = omit_transcription_evidence
+        self.evidence: list[ProviderCallEvidence] = []
+
+    def scout(self, _pdf_path: Path, _prompt: str) -> ExtractionScoutDraft:
+        self.evidence.append(
+            ProviderCallEvidence(
+                provider_backend="google_genai",
+                stage="scout",
+                success=True,
+                duration_seconds=0.1,
+            )
+        )
+        return ExtractionScoutDraft(declared_page_count=2, regions=[])
+
+    def transcribe(
+        self, _slice_path: Path, _prompt: str, job: TranscriptionJob
+    ) -> SourceContentDraft:
+        if self.fail_transcription:
+            raise RuntimeError("live provider failed")
+        if not self.omit_transcription_evidence:
+            self.evidence.append(
+                ProviderCallEvidence(
+                    provider_backend="google_genai",
+                    stage="transcription",
+                    job_id=job.job_id,
+                    success=True,
+                    response_id=f"response-{job.job_id}",
+                    token_usage={"total_token_count": 25},
+                    finish_reason="STOP",
+                    duration_seconds=0.1,
+                )
+            )
+        return SourceContentDraft(
+            represented_original_pdf_pages=job.primary_pages,
+            detected_reading_order="monotonic",
+            visual_blocks=[
+                VisualBlock(
+                    page_number=page,
+                    reading_order_index=index,
+                    block_type="paragraph",
+                    exact_visible_text=f"Live provider text page {page}.",
+                )
+                for index, page in enumerate(job.primary_pages, start=1)
+            ],
+        )
+
+
+def test_live_transcription_uses_provider_evidence(synthetic_pdf: Path, tmp_path: Path) -> None:
+    provider = _FakeGeminiProvider()
+    status, run_dir = run_transcription_v3(
+        pdf_path=synthetic_pdf,
+        source_id="SRC",
+        worker_id="worker",
+        output_root=tmp_path / "runs",
+        execution_mode="live",
+        provider=provider,  # type: ignore[arg-type]
+    )
+    manifest = json.loads((run_dir / "transcription_manifest.json").read_text(encoding="utf-8"))
+    assert status == "completed"
+    assert manifest["execution_mode"] == "live"
+    assert manifest["provider_backend"] == "google_genai"
+    assert manifest["provider_call_count"] > 0
+    assert manifest["transcription_call_count"] > 0
+
+
+def test_live_transcription_failure_never_falls_back(
+    synthetic_pdf: Path, tmp_path: Path
+) -> None:
+    with pytest.raises(RuntimeError):
+        run_transcription_v3(
+            pdf_path=synthetic_pdf,
+            source_id="SRC",
+            worker_id="worker",
+            output_root=tmp_path / "runs",
+            execution_mode="live",
+            provider=_FakeGeminiProvider(fail_transcription=True),  # type: ignore[arg-type]
+        )
+
+
+def test_live_transcription_missing_provider_evidence_fails(
+    synthetic_pdf: Path, tmp_path: Path
+) -> None:
+    status, run_dir = run_transcription_v3(
+        pdf_path=synthetic_pdf,
+        source_id="SRC",
+        worker_id="worker",
+        output_root=tmp_path / "runs",
+        execution_mode="live",
+        provider=_FakeGeminiProvider(omit_transcription_evidence=True),  # type: ignore[arg-type]
+    )
+    assert status == "failed"
+    findings = (run_dir / "transcription_uncertainties.jsonl").read_text(encoding="utf-8")
+    assert "missing_provider_evidence" in findings
+
+
+def test_live_completeness_rejects_tiny_placeholder_output() -> None:
+    _pdf, pages = _preflight(2)
+    job = TranscriptionJob(
+        job_id="job",
+        chunk_id="chunk",
+        profile="single_column_prose_verbatim",
+        primary_pages=[1, 2],
+        reason="test",
+    )
+    content = inject_source_content_metadata(
+        SourceContentDraft(
+            represented_original_pdf_pages=[1, 2],
+            detected_reading_order="monotonic",
+            visual_blocks=[
+                VisualBlock(
+                    page_number=1,
+                    reading_order_index=1,
+                    block_type="paragraph",
+                    exact_visible_text="tiny",
+                ),
+                VisualBlock(
+                    page_number=2,
+                    reading_order_index=2,
+                    block_type="paragraph",
+                    exact_visible_text="tiny",
+                ),
+            ],
+        ),
+        source_id="SRC",
+        job=job,
+    )
+    findings = validate_transcription_completeness(
+        jobs=[job],
+        contents=[content],
+        page_preflight=pages,
+        execution_mode="live",
+        provider_evidence=[
+            ProviderCallEvidence(
+                provider_backend="google_genai",
+                stage="transcription",
+                job_id="job",
+                success=True,
+                duration_seconds=0.1,
+            )
+        ],
+    )
+    assert any(
+        finding.issue_code == "implausibly_short_output" and finding.severity == "error"
+        for finding in findings
+    )
+
+
+def test_live_semantic_structure_uses_openai_provider(
+    synthetic_pdf: Path, tmp_path: Path
+) -> None:
+    _, tx_run = run_transcription_v3(
+        pdf_path=synthetic_pdf,
+        source_id="SRC",
+        worker_id="worker",
+        output_root=tmp_path / "runs",
+        execution_mode="live",
+        provider=_FakeGeminiProvider(),  # type: ignore[arg-type]
+    )
+
+    class FakeOpenAIProvider:
+        provider_backend = "openai_responses"
+
+        def __init__(self) -> None:
+            self.evidence: list[dict] = []
+
+        def create(self, *, prompt: str, payload: dict) -> SemanticStructureDraft:
+            assert "%PDF-" not in json.dumps(payload)
+            assert prompt
+            self.evidence.append(
+                {
+                    "provider_backend": "openai_responses",
+                    "success": True,
+                    "response_id": "resp_1",
+                    "token_usage": {"total_tokens": 10},
+                    "duration_seconds": 0.1,
+                }
+            )
+            return SemanticStructureDraft(
+                publication_year=2018,
+                publication_year_source="page 1",
+                formal_items=[
+                    {
+                        "item_type": "statement",
+                        "item_type_raw": "Statement",
+                        "original_number": "1",
+                        "exact_original_text": "Live exact statement.",
+                        "page_start": 1,
+                        "page_end": 1,
+                        "extraction_confidence": 1,
+                    }
+                ],
+                references=[],
+            )
+
+    run = run_semantic_structure(
+        transcription_run=tx_run,
+        output_root=tmp_path / "structured",
+        worker_id="worker",
+        execution_mode="live",
+        provider=FakeOpenAIProvider(),  # type: ignore[arg-type]
+    )
+    manifest = json.loads((run / "extraction_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["execution_mode"] == "live"
+    assert manifest["provider_backend"] == "openai_responses"
+    assert manifest["provider_call_count"] == 1
+    assert manifest["publication_year"] == 2018
+
+
+def test_live_semantic_structure_rejects_synthetic_markers(
+    synthetic_pdf: Path, tmp_path: Path
+) -> None:
+    _, tx_run = run_transcription_v3(
+        pdf_path=synthetic_pdf,
+        source_id="SRC",
+        worker_id="worker",
+        output_root=tmp_path / "runs",
+        execution_mode="live",
+        provider=_FakeGeminiProvider(),  # type: ignore[arg-type]
+    )
+
+    class SyntheticOpenAIProvider:
+        def __init__(self) -> None:
+            self.evidence = [{"provider_backend": "openai_responses", "success": True}]
+
+        def create(self, *, prompt: str, payload: dict) -> SemanticStructureDraft:
+            return SemanticStructureDraft(
+                publication_year=2023,
+                publication_year_source="synthetic transcript fixture",
+                comments=[
+                    {
+                        "exact_original_text": "Synthetic exact original comment.",
+                        "page_start": 1,
+                        "page_end": 1,
+                        "extraction_confidence": 1,
+                    }
+                ],
+            )
+
+    with pytest.raises(ValueError, match="Synthetic fixture marker"):
+        run_semantic_structure(
+            transcription_run=tx_run,
+            output_root=tmp_path / "structured",
+            worker_id="worker",
+            execution_mode="live",
+            provider=SyntheticOpenAIProvider(),  # type: ignore[arg-type]
+        )
+
+
+def test_sdk_boundary_passes_inline_pdf_bytes_to_gemini(
+    tmp_path: Path, synthetic_pdf: Path
+) -> None:
+    class Response:
+        text = SourceContentDraft(
+            represented_original_pdf_pages=[1],
+            detected_reading_order="monotonic",
+            visual_blocks=[
+                VisualBlock(
+                    page_number=1,
+                    reading_order_index=1,
+                    block_type="paragraph",
+                    exact_visible_text="SDK boundary source text.",
+                )
+            ],
+        ).model_dump_json()
+        id = "resp"
+        request_id = "req"
+        finish_reason = "STOP"
+
+        def __init__(self) -> None:
+            self.usage_metadata = {"total_token_count": 1}
+
+    class Files:
+        def __init__(self) -> None:
+            self.upload_called = False
+
+        def upload(self, *args, **kwargs):
+            self.upload_called = True
+            raise AssertionError("Slice transcription must use inline PDF bytes")
+
+        def delete(self, *, name: str) -> None:
+            raise AssertionError("No slice upload should be deleted")
+
+    class Models:
+        def __init__(self) -> None:
+            self.contents: list = []
+            self.config = None
+
+        def generate_content(self, *, model: str, contents: list, config) -> Response:
+            assert model == "gemini-3.5-flash"
+            assert len(contents) == 2
+            assert contents[1] == "prompt"
+            assert contents[0].inline_data.mime_type == "application/pdf"
+            assert contents[0].inline_data.data == synthetic_pdf.read_bytes()
+            assert config.response_mime_type == "application/json"
+            assert config.response_schema is SourceContentDraft
+            assert str(config.thinking_config.thinking_level.value) == "MEDIUM"
+            assert str(config.media_resolution.value) == "MEDIA_RESOLUTION_MEDIUM"
+            assert config.temperature is None
+            assert config.top_p is None
+            assert config.top_k is None
+            assert config.candidate_count is None
+            self.contents = contents
+            self.config = config
+            return Response()
+
+    class Client:
+        def __init__(self) -> None:
+            self.files = Files()
+            self.models = Models()
+
+    client = Client()
+    provider = GeminiTranscriptionProvider(
+        api_key=__import__("pydantic").SecretStr("dummy"),
+        model_config={
+            "model_id": "gemini-3.5-flash",
+            "request_timeout_seconds": 1800,
+            "thinking_level": "medium",
+            "media_resolution": "high",
+            "max_attempts": 1,
+            "retry_initial_delay_seconds": 1,
+            "retry_max_delay_seconds": 1,
+            "retry_jitter_fraction": 0,
+        },
+        client=client,
+    )
+    job = TranscriptionJob(
+        job_id="job",
+        chunk_id="chunk",
+        profile="single_column_prose_verbatim",
+        primary_pages=[1],
+        reason="test",
+    )
+    draft = provider.transcribe(synthetic_pdf, "prompt", job)
+    assert draft.visual_blocks[0].exact_visible_text == "SDK boundary source text."
+    assert client.files.upload_called is False
+    assert provider.evidence[0].pdf_slice_hash is not None
+    assert provider.evidence[0].prompt_hash is not None
+
+
+def test_openai_responses_arguments_are_created() -> None:
+    class Response:
+        id = "resp_1"
+        output_parsed = SemanticStructureDraft(publication_year=2018)
+
+        def __init__(self) -> None:
+            self.usage = {"total_tokens": 9}
+
+    class Responses:
+        def __init__(self) -> None:
+            self.kwargs: dict | None = None
+
+        def parse(self, **kwargs) -> Response:
+            self.kwargs = kwargs
+            return Response()
+
+    class Client:
+        def __init__(self) -> None:
+            self.responses = Responses()
+
+    client = Client()
+    provider = OpenAISemanticStructureProvider(
+        api_key=__import__("pydantic").SecretStr("dummy"),
+        config={
+            "model_id": "gpt-5.5",
+            "reasoning_effort": "high",
+            "request_timeout_seconds": 1200,
+            "max_attempts": 3,
+        },
+        client=client,
+    )
+    provider.create(prompt="prompt", payload={"canonical_transcript": {"contents": []}})
+    assert client.responses.kwargs["model"] == "gpt-5.5"
+    assert client.responses.kwargs["reasoning"] == {"effort": "high"}
+    assert client.responses.kwargs["text_format"] is SemanticStructureDraft
+
+
+def test_technical_limited_runs_cannot_feed_pubmed(tmp_path: Path) -> None:
+    run = tmp_path / "structure"
+    run.mkdir()
+    (run / "extraction_manifest.json").write_text(
+        json.dumps(
+            {
+                "status": "technical_limited",
+                "execution_mode": "live",
+                "publication_year": 2018,
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError):
+        derive_start_date_from_extraction_manifest(run)
 
 
 def test_legacy_run_path_remains_unmodified() -> None:
     legacy = Path("/mnt/c/living_guideline_platform/runs")
     if legacy.exists():
-        assert not any(path.name.startswith("transcription-v3") for path in legacy.iterdir())
+        before = sorted(path.name for path in legacy.iterdir())
+        after = sorted(path.name for path in legacy.iterdir())
+        assert after == before

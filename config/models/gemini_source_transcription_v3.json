@@ -1,9 +1,9 @@
 {
-  "provider": "google",
+  "provider": "Google Gemini Developer API",
   "api": "generate_content",
   "model_id": "gemini-3.5-flash",
   "thinking_level": "medium",
-  "media_resolution": "high",
+  "media_resolution": "profile_based",
   "prompt_version": "gemini_source_transcription_v3",
   "schema_version": "canonical_transcription_v3",
   "request_timeout_seconds": 1800,

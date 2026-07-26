@@ -26,6 +26,69 @@ def test_help_works_without_configuration() -> None:
     assert "setup-local" in result.output
 
 
+def test_v3_commands_require_explicit_live_or_dry_run(tmp_path: Path) -> None:
+    pdf = tmp_path / "test.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n%%EOF\n")
+    cases = [
+        [
+            "provider-preflight",
+        ],
+        [
+            "transcribe-guideline",
+            "--pdf",
+            str(pdf),
+            "--source-id",
+            "SRC",
+            "--output-root",
+            str(tmp_path / "runs"),
+        ],
+        [
+            "structure-guideline",
+            "--transcription-run",
+            str(tmp_path / "tx"),
+            "--output-root",
+            str(tmp_path / "runs"),
+        ],
+        [
+            "run-guideline-end-to-end-v3",
+            "--pdf",
+            str(pdf),
+            "--source-id",
+            "SRC",
+            "--output-root",
+            str(tmp_path / "runs"),
+        ],
+    ]
+    for args in cases:
+        result = runner.invoke(app, args)
+        assert result.exit_code == 2
+        assert "Specify exactly one of --live or --dry-run" in result.output
+
+
+def test_live_v3_commands_require_explicit_env_file(tmp_path: Path) -> None:
+    pdf = tmp_path / "test.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n%%EOF\n")
+    result = runner.invoke(app, ["provider-preflight", "--live"])
+    assert result.exit_code == 2
+    assert "--live requires an explicit --env-file" in result.output
+
+    result = runner.invoke(
+        app,
+        [
+            "transcribe-guideline",
+            "--live",
+            "--pdf",
+            str(pdf),
+            "--source-id",
+            "SRC",
+            "--output-root",
+            str(tmp_path / "runs"),
+        ],
+    )
+    assert result.exit_code == 2
+    assert "--live requires an explicit --env-file" in result.output
+
+
 def test_config_check_reports_only_credential_state(tmp_path: Path) -> None:
     data_root = tmp_path / "root"
     pdf_dir = tmp_path / "pdfs"
