@@ -6,6 +6,12 @@
   "media_resolution": "high",
   "repair_prompt_version": "gemini_original_reference_repair_v2",
   "repair_schema_version": "original_reference_repair_v2",
-  "request_timeout_seconds": 1200,
-  "max_attempts": 3
+  "request_timeout_seconds": 1800,
+  "max_attempts": 8,
+  "retry_initial_delay_seconds": 15,
+  "retry_backoff_multiplier": 2.0,
+  "retry_max_delay_seconds": 900,
+  "retry_jitter_fraction": 0.25,
+  "global_cooldown_after_consecutive_transient_failures": 3,
+  "global_cooldown_seconds": 900
 }

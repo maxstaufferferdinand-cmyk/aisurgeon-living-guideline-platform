@@ -1,10 +1,13 @@
 """Targeted original-bibliography repair followed by dual-namespace DOCX rebuild."""
 
 import json
+import random
 import shutil
+import time
 from collections.abc import Callable
 from contextlib import suppress
 from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Literal
@@ -193,6 +196,11 @@ def _write_jsonl_replace(path: Path, rows: list[dict[str, Any]]) -> None:
         encoding="utf-8",
     )
     tmp.replace(path)
+
+
+def _append_jsonl(path: Path, row: dict[str, Any]) -> None:
+    with path.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -629,12 +637,83 @@ class OriginalReferenceRepairV2PageJobOutput(BaseModel):
     review_notes: list[str] = Field(default_factory=list)
 
 
+SCHEMA_VERSION_ALIASES_V2 = {
+    "2.0.0",
+    "2.0",
+    "v2",
+    "2",
+    "original-reference-repair-v2",
+}
+
+
+class PageJobValidationFailed(RuntimeError):
+    def __init__(
+        self,
+        *,
+        message: str,
+        raw_payload: dict[str, Any],
+        metadata: dict[str, Any] | None = None,
+        validation_errors: Any = None,
+    ) -> None:
+        super().__init__(message)
+        self.raw_payload = raw_payload
+        self.metadata = metadata or {}
+        self.validation_errors = validation_errors
+
+
+def normalize_page_job_schema_version_v2(payload: dict[str, Any]) -> dict[str, Any]:
+    raw = payload.get("schema_version")
+    if raw is None or raw == REFERENCE_REPAIR_V2_SCHEMA_VERSION:
+        return {
+            "raw_schema_version": raw,
+            "normalized_schema_version": raw,
+            "schema_version_normalized": False,
+        }
+    if raw in SCHEMA_VERSION_ALIASES_V2:
+        payload["schema_version"] = REFERENCE_REPAIR_V2_SCHEMA_VERSION
+        return {
+            "raw_schema_version": raw,
+            "normalized_schema_version": REFERENCE_REPAIR_V2_SCHEMA_VERSION,
+            "schema_version_normalized": True,
+        }
+    raise ValueError(f"Unknown original_reference_repair_v2 schema_version: {raw}")
+
+
+def parse_page_job_raw_response_v2(
+    raw_payload: dict[str, Any],
+) -> tuple[OriginalReferenceRepairV2PageJobOutput, dict[str, Any]]:
+    payload = dict(raw_payload)
+    normalization = normalize_page_job_schema_version_v2(payload)
+    try:
+        return OriginalReferenceRepairV2PageJobOutput.model_validate(payload), normalization
+    except ValidationError as exc:
+        raise PageJobValidationFailed(
+            message="OriginalReferenceRepairV2PageJobOutput validation failed.",
+            raw_payload=raw_payload,
+            metadata={"schema_version_normalization": normalization},
+            validation_errors=exc.errors(),
+        ) from exc
+
+
 def load_reference_repair_v2_model_config() -> dict[str, Any]:
     config = _load_json(REPAIR_V2_MODEL_CONFIG_PATH)
     if config.get("repair_prompt_version") != REFERENCE_REPAIR_V2_PROMPT_VERSION:
         raise ValueError("Repair-v2 model config has wrong prompt version.")
     if config.get("repair_schema_version") != REFERENCE_REPAIR_V2_SCHEMA_VERSION:
         raise ValueError("Repair-v2 model config has wrong schema version.")
+    required_retry_fields = {
+        "request_timeout_seconds": 1800,
+        "max_attempts": 8,
+        "retry_initial_delay_seconds": 15,
+        "retry_backoff_multiplier": 2.0,
+        "retry_max_delay_seconds": 900,
+        "retry_jitter_fraction": 0.25,
+        "global_cooldown_after_consecutive_transient_failures": 3,
+        "global_cooldown_seconds": 900,
+    }
+    for key, expected in required_retry_fields.items():
+        if config.get(key) != expected:
+            raise ValueError(f"Repair-v2 model config has wrong retry field: {key}.")
     serialized = json.dumps(config, sort_keys=True)
     if "document_map" in serialized:
         raise ValueError("Document-map versions are forbidden in Reference Repair v2 config.")
@@ -645,6 +724,20 @@ def reject_document_map_versions_in_repair_fingerprint(fingerprint: dict[str, An
     serialized = json.dumps(fingerprint, sort_keys=True)
     if "gemini_document_map_v1" in serialized or "document_map_v1" in serialized:
         raise ValueError("Document-map prompt/schema detected in Reference Repair v2 fingerprint.")
+
+
+def _compatible_raw_import_fingerprint(
+    old_fingerprint: dict[str, Any], new_fingerprint: dict[str, Any]
+) -> bool:
+    keys = (
+        "source_id",
+        "repair_version",
+        "repair_prompt_version",
+        "repair_schema_version",
+        "pdf_hash",
+        "page_plan",
+    )
+    return all(old_fingerprint.get(key) == new_fingerprint.get(key) for key in keys)
 
 
 def bibliography_page_plan_v2(
@@ -948,6 +1041,195 @@ def plan_gap_repair_cycles_v2(
     return {"max_cycles": max_cycles, "cycles": cycles}
 
 
+RETRYABLE_GEMINI_HTTP_STATUSES = {408, 429, 500, 502, 503, 504}
+NON_RETRYABLE_GEMINI_HTTP_STATUSES = {400, 401, 403}
+SENSITIVE_ERROR_KEYS = {"authorization", "api_key", "x-goog-api-key", "key", "token", "password"}
+
+
+def _sanitize_error_value(value: Any, *, max_length: int = 600) -> Any:
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, dict):
+        sanitized: dict[str, Any] = {}
+        for key, item in value.items():
+            lowered = str(key).lower()
+            sanitized[str(key)] = (
+                "[redacted]"
+                if any(secret in lowered for secret in SENSITIVE_ERROR_KEYS)
+                else _sanitize_error_value(item, max_length=max_length)
+            )
+        return sanitized
+    if isinstance(value, list):
+        return [_sanitize_error_value(item, max_length=max_length) for item in value]
+    text = str(value)
+    for marker in ("Authorization:", "x-goog-api-key", "api_key", "GEMINI_API_KEY"):
+        if marker.lower() in text.lower():
+            text = "[redacted]"
+            break
+    return text[:max_length]
+
+
+def _exception_http_status(exc: Exception) -> int | None:
+    for attribute in ("status_code", "code"):
+        value = getattr(exc, attribute, None)
+        if isinstance(value, int):
+            return value
+    response = getattr(exc, "response", None)
+    value = getattr(response, "status_code", None)
+    return value if isinstance(value, int) else None
+
+
+def _headers_from_exception(exc: Exception) -> dict[str, Any]:
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    if headers is None:
+        headers = getattr(exc, "headers", None)
+    if headers is None:
+        return {}
+    return {str(key).lower(): value for key, value in dict(headers).items()}
+
+
+def _retry_after_seconds(exc: Exception, *, now: Callable[[], datetime]) -> int | None:
+    value = _headers_from_exception(exc).get("retry-after")
+    if value is None:
+        return None
+    text = str(value).strip()
+    if text.isdigit():
+        return max(0, int(text))
+    with suppress(Exception):
+        parsed = parsedate_to_datetime(text)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return max(0, int((parsed - now()).total_seconds()))
+    return None
+
+
+def _request_id_from_exception(exc: Exception) -> str | None:
+    headers = _headers_from_exception(exc)
+    for key in ("x-request-id", "x-goog-request-id", "x-google-request-id"):
+        value = headers.get(key)
+        if value:
+            return str(value)
+    for attribute in ("request_id", "requestId"):
+        value = getattr(exc, attribute, None)
+        if value:
+            return str(value)
+    return None
+
+
+def _api_status_from_exception(exc: Exception) -> str | None:
+    for attribute in ("status", "reason", "reason_phrase"):
+        value = getattr(exc, attribute, None)
+        if value:
+            return str(value)
+    response = getattr(exc, "response", None)
+    for attribute in ("reason_phrase", "reason"):
+        value = getattr(response, attribute, None)
+        if value:
+            return str(value)
+    return None
+
+
+def _api_message_from_exception(exc: Exception) -> str:
+    for attribute in ("message", "details"):
+        value = getattr(exc, attribute, None)
+        if value:
+            return str(_sanitize_error_value(value))
+    response = getattr(exc, "response", None)
+    for attribute in ("text", "content"):
+        value = getattr(response, attribute, None)
+        if value:
+            return str(_sanitize_error_value(value))
+    return str(_sanitize_error_value(exc))
+
+
+def classify_gemini_reference_repair_error(exc: Exception) -> dict[str, Any]:
+    status = _exception_http_status(exc)
+    class_name = exc.__class__.__name__.lower()
+    module = exc.__class__.__module__.lower()
+    message = _api_message_from_exception(exc).lower()
+    non_retryable_message = any(
+        phrase in message
+        for phrase in (
+            "invalid api key",
+            "permission denied",
+            "invalid model",
+            "model not found",
+            "invalid request",
+            "request schema",
+        )
+    )
+    retryable_class = any(
+        token in class_name or token in module
+        for token in (
+            "readtimeout",
+            "connecttimeout",
+            "timeout",
+            "connectionerror",
+            "connectionreset",
+            "connectionaborted",
+            "servererror",
+            "serviceunavailable",
+            "temporary",
+            "dns",
+        )
+    )
+    if status in NON_RETRYABLE_GEMINI_HTTP_STATUSES or non_retryable_message:
+        transient = False
+    elif status in RETRYABLE_GEMINI_HTTP_STATUSES or isinstance(
+        exc, (ConnectionError, TimeoutError, OSError)
+    ):
+        transient = True
+    else:
+        transient = retryable_class
+    return {
+        "exception_class": exc.__class__.__name__,
+        "exception_module": exc.__class__.__module__,
+        "http_status": status,
+        "api_status": _api_status_from_exception(exc),
+        "api_message": _api_message_from_exception(exc),
+        "request_id": _request_id_from_exception(exc),
+        "transient": transient,
+    }
+
+
+def calculate_gemini_retry_delay_seconds(
+    *,
+    model_config: dict[str, Any],
+    attempt_number: int,
+    retry_after_seconds: int | None = None,
+    random_fraction: float | None = None,
+) -> tuple[int, int]:
+    initial = float(model_config["retry_initial_delay_seconds"])
+    multiplier = float(model_config["retry_backoff_multiplier"])
+    maximum = int(model_config["retry_max_delay_seconds"])
+    base_delay = min(maximum, round(initial * (multiplier ** (attempt_number - 1))))
+    if retry_after_seconds is not None:
+        base_delay = max(base_delay, int(retry_after_seconds))
+    jitter_fraction = float(model_config.get("retry_jitter_fraction", 0.0))
+    if jitter_fraction and retry_after_seconds is None:
+        fraction = random.random() if random_fraction is None else random_fraction
+        factor = 1 + ((fraction * 2) - 1) * jitter_fraction
+        applied = round(base_delay * factor)
+    else:
+        applied = base_delay
+    return base_delay, min(maximum, max(0, applied))
+
+
+class GeminiReferenceRepairRetryState:
+    def __init__(self) -> None:
+        self.consecutive_transient_failures = 0
+
+    def record_success(self) -> None:
+        self.consecutive_transient_failures = 0
+
+    def record_failure(self, *, transient: bool) -> None:
+        if transient:
+            self.consecutive_transient_failures += 1
+        else:
+            self.consecutive_transient_failures = 0
+
+
 class GeminiOriginalReferenceRepairV2Client:
     """Gemini boundary for per-page physical PDF slices."""
 
@@ -957,23 +1239,230 @@ class GeminiOriginalReferenceRepairV2Client:
         api_key: SecretStr,
         model_config: dict[str, Any],
         client: Any | None = None,
+        sleep: Callable[[float], None] = time.sleep,
+        monotonic: Callable[[], float] = time.monotonic,
+        now: Callable[[], datetime] = lambda: datetime.now(UTC),
+        output: Callable[[str], None] = print,
+        random_fraction: Callable[[], float] = random.random,
+        retry_state: GeminiReferenceRepairRetryState | None = None,
     ) -> None:
         config = SimpleNamespace(**model_config)
-        self._gateway = GeminiDocumentMapClient(api_key=api_key, model_config=config, client=client)
+        self._gateway = GeminiDocumentMapClient(
+            api_key=api_key,
+            model_config=config,
+            client=client,
+            sleep=sleep,
+            request_timeout_seconds=int(model_config["request_timeout_seconds"]),
+        )
         self._model_config = model_config
+        self._sleep = sleep
+        self._monotonic = monotonic
+        self._now = now
+        self._output = output
+        self._random_fraction = random_fraction
+        self._retry_state = retry_state or GeminiReferenceRepairRetryState()
+
+    @staticmethod
+    def _repair_schema() -> dict[str, Any]:
+        return GeminiDocumentMapClient.request_schema(OriginalReferenceRepairV2PageJobOutput)
+
+    def _write_attempt(self, job_dir: Path, record: dict[str, Any]) -> None:
+        sanitized = _sanitize_error_value(record)
+        _append_jsonl(job_dir / "attempts.jsonl", sanitized)
+        if sanitized.get("exception_class") and (
+            sanitized.get("final_failure") or not sanitized.get("retry_planned")
+        ):
+            _write_json_replace(job_dir / "last_error.json", sanitized)
+
+    def _wait_with_progress(self, *, page: int, seconds: int) -> None:
+        remaining = int(seconds)
+        while remaining > 0:
+            step = min(60, remaining)
+            self._sleep(float(step))
+            remaining -= step
+            if remaining > 0:
+                self._output(
+                    f"[Seite {page}] Warte auf nächsten Gemini-Versuch: "
+                    f"noch {remaining} Sekunden."
+                )
+
+    def _apply_global_cooldown_if_needed(self, *, page: int) -> None:
+        threshold = int(
+            self._model_config["global_cooldown_after_consecutive_transient_failures"]
+        )
+        if self._retry_state.consecutive_transient_failures < threshold:
+            return
+        cooldown = int(self._model_config["global_cooldown_seconds"])
+        self._output(
+            f"[Seite {page}] {self._retry_state.consecutive_transient_failures} "
+            f"aufeinanderfolgende transiente Gemini-Fehler. "
+            f"Globaler Cooldown: {cooldown} Sekunden."
+        )
+        self._wait_with_progress(page=page, seconds=cooldown)
+
+    def _attempt_operation(
+        self,
+        *,
+        operation: Callable[[], Any],
+        stage: Literal["upload", "file_processing", "generate_content"],
+        job_id: str,
+        primary_original_pdf_page: int,
+        job_dir: Path,
+    ) -> Any:
+        max_attempts = int(self._model_config["max_attempts"])
+        for attempt in range(1, max_attempts + 1):
+            self._apply_global_cooldown_if_needed(page=primary_original_pdf_page)
+            started_at = self._now()
+            started_monotonic = self._monotonic()
+            try:
+                value = operation()
+            except Exception as exc:  # SDK exception types vary by transport.
+                finished_at = self._now()
+                details = classify_gemini_reference_repair_error(exc)
+                retry_after = _retry_after_seconds(exc, now=self._now)
+                calculated, applied = calculate_gemini_retry_delay_seconds(
+                    model_config=self._model_config,
+                    attempt_number=attempt,
+                    retry_after_seconds=retry_after if details["http_status"] == 429 else None,
+                    random_fraction=self._random_fraction(),
+                )
+                transient = bool(details["transient"])
+                retry_planned = transient and attempt < max_attempts
+                self._retry_state.record_failure(transient=transient)
+                record = {
+                    "job_id": job_id,
+                    "primary_original_pdf_page": primary_original_pdf_page,
+                    "stage": stage,
+                    "attempt_number": attempt,
+                    "max_attempts": max_attempts,
+                    "started_at": started_at.isoformat(),
+                    "finished_at": finished_at.isoformat(),
+                    "duration_seconds": round(self._monotonic() - started_monotonic, 3),
+                    **details,
+                    "retry_after_seconds": retry_after,
+                    "calculated_backoff_seconds": calculated,
+                    "applied_delay_seconds": applied if retry_planned else None,
+                    "model_id": self._model_config["model_id"],
+                    "retry_planned": retry_planned,
+                    "response_received": False,
+                    "raw_response_preserved": False,
+                    "final_failure": not retry_planned,
+                }
+                self._write_attempt(job_dir, record)
+                if retry_planned:
+                    status = (
+                        f"HTTP {details['http_status']} {details.get('api_status') or ''}".strip()
+                        if details.get("http_status")
+                        else details["exception_class"]
+                    )
+                    if details["http_status"] == 429 and retry_after is not None:
+                        self._output(
+                            f"[Seite {primary_original_pdf_page}] HTTP 429 "
+                            f"{details.get('api_status') or 'RESOURCE_EXHAUSTED'}.\n"
+                            f"Retry-After: {retry_after} Sekunden.\n"
+                            f"Neuer Versuch in {applied} Sekunden."
+                        )
+                    else:
+                        self._output(
+                            f"[Seite {primary_original_pdf_page}] Gemini-Versuch "
+                            f"{attempt}/{max_attempts} fehlgeschlagen:\n"
+                            f"{status} - {details['api_message']}\n"
+                            f"Neuer Versuch in {applied} Sekunden."
+                        )
+                    self._wait_with_progress(page=primary_original_pdf_page, seconds=applied)
+                    continue
+                message = (
+                    f"Gemini PageJob {job_id} failed at {stage}: "
+                    f"{details.get('http_status') or details['exception_class']} "
+                    f"{details['api_message']}"
+                )
+                raise GeminiError(message) from exc
+            self._retry_state.record_success()
+            finished_at = self._now()
+            self._write_attempt(
+                job_dir,
+                {
+                    "job_id": job_id,
+                    "primary_original_pdf_page": primary_original_pdf_page,
+                    "stage": stage,
+                    "attempt_number": attempt,
+                    "max_attempts": max_attempts,
+                    "started_at": started_at.isoformat(),
+                    "finished_at": finished_at.isoformat(),
+                    "duration_seconds": round(self._monotonic() - started_monotonic, 3),
+                    "exception_class": None,
+                    "exception_module": None,
+                    "http_status": None,
+                    "api_status": None,
+                    "api_message": None,
+                    "request_id": None,
+                    "retry_after_seconds": None,
+                    "calculated_backoff_seconds": None,
+                    "applied_delay_seconds": None,
+                    "model_id": self._model_config["model_id"],
+                    "transient": False,
+                    "retry_planned": False,
+                    "response_received": stage == "generate_content",
+                    "raw_response_preserved": False,
+                    "final_failure": False,
+                },
+            )
+            return value
+        raise GeminiError(f"Gemini PageJob {job_id} failed after {max_attempts} attempts.")
+
+    def _wait_until_active_v2(
+        self, *, remote: Any, job_id: str, primary_original_pdf_page: int, job_dir: Path
+    ) -> Any:
+        name = getattr(remote, "name", None)
+        current = remote
+        max_attempts = int(self._model_config["max_attempts"])
+        for attempt in range(1, max_attempts + 1):
+            state = str(getattr(current, "state", "")).upper().split(".")[-1]
+            if state == "ACTIVE":
+                return current
+            if state == "FAILED":
+                raise GeminiError("Gemini-Dateiverarbeitung ist endgültig fehlgeschlagen.")
+            if state != "PROCESSING":
+                raise GeminiError("Unbekannter Gemini-Dateistatus.")
+            if attempt == max_attempts:
+                break
+            current = self._attempt_operation(
+                operation=lambda: self._gateway._client.files.get(name=name),
+                stage="file_processing",
+                job_id=job_id,
+                primary_original_pdf_page=primary_original_pdf_page,
+                job_dir=job_dir,
+            )
+        raise GeminiError("Gemini-Dateiverarbeitung hat das Zeitlimit überschritten.")
 
     def request_page_job(
-        self, *, slice_pdf: Path, prompt: str, source_id: str
+        self,
+        *,
+        slice_pdf: Path,
+        prompt: str,
+        source_id: str,
+        job_id: str,
+        primary_original_pdf_page: int,
+        job_dir: Path,
     ) -> tuple[OriginalReferenceRepairV2PageJobOutput, dict[str, Any], dict[str, Any]]:
-        remote = self._gateway._with_retry(
-            lambda: self._gateway._client.files.upload(
+        remote = self._attempt_operation(
+            operation=lambda: self._gateway._client.files.upload(
                 file=slice_pdf, config={"mime_type": "application/pdf"}
-            )
+            ),
+            stage="upload",
+            job_id=job_id,
+            primary_original_pdf_page=primary_original_pdf_page,
+            job_dir=job_dir,
         )
         try:
-            remote = self._gateway.wait_until_active(remote)
-            response = self._gateway._with_retry(
-                lambda: self._gateway._client.models.generate_content(
+            remote = self._wait_until_active_v2(
+                remote=remote,
+                job_id=job_id,
+                primary_original_pdf_page=primary_original_pdf_page,
+                job_dir=job_dir,
+            )
+            response = self._attempt_operation(
+                operation=lambda: self._gateway._client.models.generate_content(
                     model=self._model_config["model_id"],
                     contents=[
                         {
@@ -992,27 +1481,135 @@ class GeminiOriginalReferenceRepairV2Client:
                             f"MEDIA_RESOLUTION_{self._model_config['media_resolution'].upper()}"
                         ),
                         "response_mime_type": "application/json",
-                        "response_json_schema": (
-                            OriginalReferenceRepairV2PageJobOutput.model_json_schema()
-                        ),
+                        "response_json_schema": self._repair_schema(),
                         "http_options": {
                             "timeout": self._model_config["request_timeout_seconds"] * 1000
                         },
                     },
-                )
+                ),
+                stage="generate_content",
+                job_id=job_id,
+                primary_original_pdf_page=primary_original_pdf_page,
+                job_dir=job_dir,
             )
             raw_text = getattr(response, "text", None)
             if not isinstance(raw_text, str):
-                raise GeminiResponseValidationError("Gemini-Antwort enthält kein JSON.")
-            raw_payload = json.loads(raw_text)
-            validated = OriginalReferenceRepairV2PageJobOutput.model_validate(raw_payload)
+                raw_payload = {"raw_response_text": None}
+                metadata = {"response_received": True, "raw_response_preserved": True}
+                _write_json_replace(job_dir / "raw_response.json", raw_payload)
+                record = {
+                    "job_id": job_id,
+                    "primary_original_pdf_page": primary_original_pdf_page,
+                    "stage": "response_parse",
+                    "attempt_number": 1,
+                    "max_attempts": int(self._model_config["max_attempts"]),
+                    "started_at": self._now().isoformat(),
+                    "finished_at": self._now().isoformat(),
+                    "duration_seconds": 0,
+                    "exception_class": "GeminiResponseValidationError",
+                    "exception_module": GeminiResponseValidationError.__module__,
+                    "http_status": None,
+                    "api_status": None,
+                    "api_message": "Gemini-Antwort enthält kein JSON.",
+                    "request_id": None,
+                    "retry_after_seconds": None,
+                    "calculated_backoff_seconds": None,
+                    "applied_delay_seconds": None,
+                    "model_id": self._model_config["model_id"],
+                    "transient": False,
+                    "retry_planned": False,
+                    "response_received": True,
+                    "raw_response_preserved": True,
+                    "final_failure": True,
+                }
+                self._write_attempt(job_dir, record)
+                raise PageJobValidationFailed(
+                    message="Gemini-Antwort enthält kein JSON.",
+                    raw_payload=raw_payload,
+                    metadata=metadata,
+                )
+            try:
+                raw_payload = json.loads(raw_text)
+            except json.JSONDecodeError as exc:
+                raw_payload = {"raw_response_text": raw_text}
+                _write_json_replace(job_dir / "raw_response.json", raw_payload)
+                record = {
+                    "job_id": job_id,
+                    "primary_original_pdf_page": primary_original_pdf_page,
+                    "stage": "response_parse",
+                    "attempt_number": 1,
+                    "max_attempts": int(self._model_config["max_attempts"]),
+                    "started_at": self._now().isoformat(),
+                    "finished_at": self._now().isoformat(),
+                    "duration_seconds": 0,
+                    "exception_class": exc.__class__.__name__,
+                    "exception_module": exc.__class__.__module__,
+                    "http_status": None,
+                    "api_status": None,
+                    "api_message": str(exc),
+                    "request_id": None,
+                    "retry_after_seconds": None,
+                    "calculated_backoff_seconds": None,
+                    "applied_delay_seconds": None,
+                    "model_id": self._model_config["model_id"],
+                    "transient": False,
+                    "retry_planned": False,
+                    "response_received": True,
+                    "raw_response_preserved": True,
+                    "final_failure": True,
+                }
+                self._write_attempt(job_dir, record)
+                raise PageJobValidationFailed(
+                    message="Gemini-Antwort ist kein valides JSON.",
+                    raw_payload=raw_payload,
+                    metadata={"response_received": True, "raw_response_preserved": True},
+                ) from exc
             metadata = {
                 "finish_reason": getattr(response, "finish_reason", None),
                 "usage": self._gateway.normalize_usage(getattr(response, "usage_metadata", None)),
                 "response_candidate_count": len(getattr(response, "candidates", []) or []),
                 "response_size": len(raw_text),
-                "attempt_count": 1,
+                "attempt_count": int(self._model_config["max_attempts"]),
+                "response_received": True,
+                "raw_response_preserved": True,
             }
+            try:
+                validated, normalization = parse_page_job_raw_response_v2(raw_payload)
+            except (PageJobValidationFailed, ValueError) as exc:
+                _write_json_replace(job_dir / "raw_response.json", raw_payload)
+                record = {
+                    "job_id": job_id,
+                    "primary_original_pdf_page": primary_original_pdf_page,
+                    "stage": "schema_validation",
+                    "attempt_number": 1,
+                    "max_attempts": int(self._model_config["max_attempts"]),
+                    "started_at": self._now().isoformat(),
+                    "finished_at": self._now().isoformat(),
+                    "duration_seconds": 0,
+                    "exception_class": exc.__class__.__name__,
+                    "exception_module": exc.__class__.__module__,
+                    "http_status": None,
+                    "api_status": None,
+                    "api_message": str(exc),
+                    "request_id": None,
+                    "retry_after_seconds": None,
+                    "calculated_backoff_seconds": None,
+                    "applied_delay_seconds": None,
+                    "model_id": self._model_config["model_id"],
+                    "transient": False,
+                    "retry_planned": False,
+                    "response_received": True,
+                    "raw_response_preserved": True,
+                    "final_failure": True,
+                }
+                self._write_attempt(job_dir, record)
+                raise PageJobValidationFailed(
+                    message=str(exc),
+                    raw_payload=raw_payload,
+                    metadata=metadata,
+                    validation_errors=getattr(exc, "validation_errors", None),
+                ) from exc
+            metadata["schema_version_normalization"] = normalization
             return validated, raw_payload, metadata
         finally:
             with suppress(Exception):
@@ -1082,16 +1679,32 @@ def run_reference_repair_v2_and_rebuild(
         "git_commit": _git_commit(),
     }
     reject_document_map_versions_in_repair_fingerprint(fingerprint)
+    import_raw_from_run: Path | None = None
     if resume_run:
-        run_dir = resume_run.resolve()
-        if _load_json(run_dir / "checkpoint_fingerprint.json") != fingerprint:
+        candidate_resume_run = resume_run.resolve()
+        old_fingerprint = _load_json(candidate_resume_run / "checkpoint_fingerprint.json")
+        if old_fingerprint == fingerprint:
+            run_dir = candidate_resume_run
+            manifest_path = run_dir / "reference_repair_v2_manifest.json"
+            if manifest_path.is_file() and _load_json(manifest_path).get("status") in {
+                "completed",
+                "completed_with_review",
+            }:
+                return run_dir
+        elif _compatible_raw_import_fingerprint(old_fingerprint, fingerprint):
+            import_raw_from_run = candidate_resume_run
+            root = ensure_external_run_root(output_root, synthesis_run)
+            run_dir = root / (
+                f"reference-repair-v2-{now():%Y%m%dT%H%M%S%fZ}-{source_id}-"
+                f"{sha256_text(json.dumps(fingerprint, sort_keys=True))[:8]}"
+            )
+            run_dir.mkdir(parents=True, exist_ok=False)
+            write_json(
+                run_dir / "checkpoint_fingerprint.json",
+                {**fingerprint, "import_raw_from_run": str(import_raw_from_run)},
+            )
+        else:
             raise ValueError("Resume fingerprint does not match")
-        manifest_path = run_dir / "reference_repair_v2_manifest.json"
-        if manifest_path.is_file() and _load_json(manifest_path).get("status") in {
-            "completed",
-            "completed_with_review",
-        }:
-            return run_dir
     else:
         root = ensure_external_run_root(output_root, synthesis_run)
         run_dir = root / (
@@ -1127,7 +1740,105 @@ def run_reference_repair_v2_and_rebuild(
                 "completed_with_review",
             }:
                 raw = _load_json(job_dir / "raw_response.json")
-                page_outputs.append(OriginalReferenceRepairV2PageJobOutput.model_validate(raw))
+                output, normalization = parse_page_job_raw_response_v2(raw)
+                if normalization["schema_version_normalized"]:
+                    checkpoint["metadata"] = {
+                        **checkpoint.get("metadata", {}),
+                        "schema_version_normalization": normalization,
+                    }
+                    checkpoint["status"] = "completed"
+                    _write_json_replace(checkpoint_path, checkpoint)
+                    manifest_path = job_dir / "job_manifest.json"
+                    manifest = _load_json(manifest_path) if manifest_path.exists() else {}
+                    manifest["schema_version_normalization"] = normalization
+                    manifest["status"] = "completed"
+                    _write_json_replace(manifest_path, manifest)
+                    _write_jsonl_replace(
+                        job_dir / "validated_references.jsonl",
+                        [ref.model_dump(mode="json") for ref in output.references],
+                    )
+                page_outputs.append(output)
+                continue
+        if import_raw_from_run and not (job_dir / "raw_response.json").exists():
+            imported_job_dir = import_raw_from_run / "page_jobs" / job["job_id"]
+            imported_raw = imported_job_dir / "raw_response.json"
+            if imported_raw.exists():
+                shutil.copy2(imported_raw, job_dir / "raw_response.json")
+                _write_json_replace(
+                    job_dir / "imported_compatible_raw_response.json",
+                    {
+                        "source_run": str(import_raw_from_run),
+                        "source_raw_response": str(imported_raw),
+                        "imported_compatible_raw_response": True,
+                    },
+                )
+        if (job_dir / "raw_response.json").exists():
+            raw = _load_json(job_dir / "raw_response.json")
+            try:
+                output, normalization = parse_page_job_raw_response_v2(raw)
+                status, job_findings = validate_page_job_output_v2(output)
+                metadata = {
+                    "schema_version_normalization": normalization,
+                    "reparsed_from_raw": True,
+                    "imported_compatible_raw_response": bool(
+                        (job_dir / "imported_compatible_raw_response.json").exists()
+                    ),
+                }
+                _write_jsonl_replace(
+                    job_dir / "validated_references.jsonl",
+                    [ref.model_dump(mode="json") for ref in output.references],
+                )
+                _write_json_replace(
+                    job_dir / "job_manifest.json",
+                    {
+                        "job": job,
+                        "metadata": metadata,
+                        "schema_version_normalization": normalization,
+                        "status": status,
+                        "findings": job_findings,
+                    },
+                )
+                _write_json_replace(
+                    checkpoint_path,
+                    {
+                        "fingerprint": job_fingerprint,
+                        "status": status,
+                        "metadata": metadata,
+                        "findings": job_findings,
+                    },
+                )
+                findings.extend(job_findings)
+                if status != "failed":
+                    page_outputs.append(output)
+                    continue
+            except (PageJobValidationFailed, ValueError) as exc:
+                error_finding = {
+                    "severity": "error",
+                    "issue_code": "page_job_validation_failed",
+                    "job_id": job["job_id"],
+                    "message": str(exc),
+                    "validation_errors": getattr(exc, "validation_errors", None),
+                }
+                metadata = getattr(exc, "metadata", {})
+                _write_json_replace(
+                    job_dir / "job_manifest.json",
+                    {
+                        "job": job,
+                        "metadata": metadata,
+                        "status": "failed",
+                        "findings": [error_finding],
+                    },
+                )
+                _write_json_replace(
+                    checkpoint_path,
+                    {
+                        "fingerprint": job_fingerprint,
+                        "status": "failed",
+                        "metadata": metadata,
+                        "findings": [error_finding],
+                    },
+                )
+                findings.append(error_finding)
                 continue
         request_prompt = _page_job_prompt_v2(
             base_prompt=prompt,
@@ -1137,9 +1848,77 @@ def run_reference_repair_v2_and_rebuild(
         )
         (job_dir / "request_prompt.txt").write_text(request_prompt, encoding="utf-8")
         _write_json_replace(job_dir / "slice_page_map.json", job["slice_page_map"])
-        output, raw_payload, metadata = gateway.request_page_job(
-            slice_pdf=slice_pdf, prompt=request_prompt, source_id=source_id
-        )
+        try:
+            output, raw_payload, metadata = gateway.request_page_job(
+                slice_pdf=slice_pdf,
+                prompt=request_prompt,
+                source_id=source_id,
+                job_id=job["job_id"],
+                primary_original_pdf_page=job["primary_original_pdf_page"],
+                job_dir=job_dir,
+            )
+        except PageJobValidationFailed as exc:
+            raw_payload = exc.raw_payload
+            metadata = exc.metadata
+            error_finding = {
+                "severity": "error",
+                "issue_code": "page_job_validation_failed",
+                "job_id": job["job_id"],
+                "message": str(exc),
+                "validation_errors": exc.validation_errors,
+            }
+            _write_json_replace(job_dir / "raw_response.json", raw_payload)
+            _write_json_replace(
+                job_dir / "job_manifest.json",
+                {
+                    "job": job,
+                    "metadata": metadata,
+                    "status": "failed",
+                    "findings": [error_finding],
+                },
+            )
+            _write_json_replace(
+                checkpoint_path,
+                {
+                    "fingerprint": job_fingerprint,
+                    "status": "failed",
+                    "metadata": metadata,
+                    "findings": [error_finding],
+                },
+            )
+            findings.append(error_finding)
+            continue
+        except GeminiError as exc:
+            metadata = {}
+            last_error_path = job_dir / "last_error.json"
+            if last_error_path.exists():
+                metadata["last_error"] = _load_json(last_error_path)
+            error_finding = {
+                "severity": "error",
+                "issue_code": "page_job_gemini_failed",
+                "job_id": job["job_id"],
+                "message": str(exc),
+            }
+            _write_json_replace(
+                job_dir / "job_manifest.json",
+                {
+                    "job": job,
+                    "metadata": metadata,
+                    "status": "failed",
+                    "findings": [error_finding],
+                },
+            )
+            _write_json_replace(
+                checkpoint_path,
+                {
+                    "fingerprint": job_fingerprint,
+                    "status": "failed",
+                    "metadata": metadata,
+                    "findings": [error_finding],
+                },
+            )
+            findings.append(error_finding)
+            continue
         status, job_findings = validate_page_job_output_v2(output)
         _write_json_replace(job_dir / "raw_response.json", raw_payload)
         _write_jsonl_replace(
@@ -1148,7 +1927,13 @@ def run_reference_repair_v2_and_rebuild(
         )
         _write_json_replace(
             job_dir / "job_manifest.json",
-            {"job": job, "metadata": metadata, "status": status, "findings": job_findings},
+            {
+                "job": job,
+                "metadata": metadata,
+                "schema_version_normalization": metadata.get("schema_version_normalization"),
+                "status": status,
+                "findings": job_findings,
+            },
         )
         _write_json_replace(
             checkpoint_path,

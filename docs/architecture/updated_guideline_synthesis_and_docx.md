@@ -52,3 +52,23 @@ existing completed synthesis run. It does not call an LLM, does not mutate the s
 writes a new Reference-/DOCX-Rebuild run containing `original_references_exact.jsonl`,
 `new_references_numbered.jsonl`, namespace maps, citation occurrence logs, integrity reports, and
 a new DOCX with the corrected dual literature structure.
+
+`aisurgeon repair-and-rebuild-guideline-references-v2` uses Gemini only for targeted original
+bibliography repair from physical page-slice PDFs. Each PageJob has a 30-minute request timeout
+and up to eight attempts. Retryable failures are limited to transient transport/API conditions
+(HTTP 408, 429, 500, 502, 503, 504, connection resets/aborts, connect/read timeouts, temporary DNS
+or SDK service-unavailable/server errors, and temporary Google file-upload failures). HTTP 400,
+401, 403, invalid credentials, invalid model/request/schema failures, and validated-response
+schema errors are hard failures.
+
+Backoff starts at 15 seconds and doubles to a 900-second cap, with ±25% jitter. HTTP 429 preserves
+Retry-After and uses at least that delay. After three consecutive transient API failures across
+PageJobs, the worker enters a 900-second global cooldown before the next API attempt; any
+successful API call resets the counter. Every failed or successful API attempt is written
+immediately to `page_jobs/page_XXXX/attempts.jsonl`; terminal failures also update
+`last_error.json`, `job_manifest.json`, and `checkpoint.json` without storing secrets or
+Authorization headers. Long waits emit progress at least every 60 seconds. Completed PageJobs keep
+their checkpoints; failed or incomplete PageJobs can be retried later, and compatible saved
+`raw_response.json` files may be imported and revalidated when only the retry configuration
+changed. This prevents temporary Gemini service latency from discarding already completed
+bibliography-page work.

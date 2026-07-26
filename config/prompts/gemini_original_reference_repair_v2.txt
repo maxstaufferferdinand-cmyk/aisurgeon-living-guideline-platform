@@ -26,3 +26,9 @@ Rules for the primary page:
 - Mark uncertainty in review_required and review_notes.
 
 Return only JSON matching the supplied original_reference_repair_v2 schema.
+
+The top-level field must be exactly:
+
+"schema_version": "original_reference_repair_v2"
+
+Do not output "2.0.0", "2.0", "v2", "2", or any other schema_version value.
