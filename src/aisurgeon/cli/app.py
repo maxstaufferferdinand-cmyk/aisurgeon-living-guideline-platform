@@ -19,9 +19,16 @@ from aisurgeon.extraction.gemini.document_map import (
 )
 from aisurgeon.extraction.gemini.errors import GeminiConfigurationError
 from aisurgeon.extraction.pdf_registration import PdfRegistrationError, register_pdf
+from aisurgeon.extraction.provider_preflight import run_provider_preflight
+from aisurgeon.extraction.semantic_structure import run_semantic_structure
+from aisurgeon.extraction.transcription_v3.pipeline import run_transcription_v3
 from aisurgeon.mapping.pubmed import map_pubmed_evidence
+from aisurgeon.orchestration.guideline_v3 import run_guideline_end_to_end_v3
 from aisurgeon.orchestration.pubmed_mapping import run_to_mapping as orchestrate_to_mapping
-from aisurgeon.search.pubmed.generation import generate_searches
+from aisurgeon.search.pubmed.generation import (
+    derive_start_date_from_extraction_manifest,
+    generate_searches,
+)
 from aisurgeon.search.pubmed.ncbi import fetch_pubmed
 from aisurgeon.synthesis.reference_rebuild import rebuild_guideline_references
 from aisurgeon.synthesis.reference_repair import (
@@ -348,14 +355,149 @@ def extract_guideline(
         typer.echo("Dry Run: kein Upload und kein Gemini-API-Aufruf ausgeführt.")
 
 
+@app.command("provider-preflight")
+def provider_preflight(
+    env_file: EnvFileOption = None,
+    gemini: Annotated[bool, typer.Option("--gemini/--no-gemini")] = True,
+    openai: Annotated[bool, typer.Option("--openai/--no-openai")] = True,
+    ncbi: Annotated[bool, typer.Option("--ncbi/--no-ncbi")] = True,
+) -> None:
+    """Run secret-free provider preflight checks; provider calls are mocked here."""
+    settings = _load_settings(env_file)
+    providers = set()
+    if gemini:
+        providers.add("gemini")
+    if openai:
+        providers.add("openai")
+    if ncbi:
+        providers.add("ncbi")
+    report = run_provider_preflight(
+        providers=providers,
+        gemini_api_key=settings.gemini_api_key,
+        openai_api_key=settings.openai_api_key,
+        ncbi_api_key=settings.ncbi_api_key,
+        ncbi_email=settings.ncbi_email,
+    )
+    typer.echo(report.model_dump_json(indent=2))
+
+
+@app.command("transcribe-guideline")
+def transcribe_guideline(
+    pdf: Annotated[Path, typer.Option("--pdf")],
+    source_id: Annotated[str, typer.Option("--source-id")],
+    output_root: Annotated[Path, typer.Option("--output-root")],
+    env_file: EnvFileOption = None,
+    resume_run: Annotated[Path | None, typer.Option("--resume-run")] = None,
+    planner_mode: Annotated[str, typer.Option("--planner-mode")] = "deterministic",
+    gemini_concurrency: Annotated[int, typer.Option("--gemini-concurrency", min=1, max=4)] = 1,
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+    limit: Annotated[int | None, typer.Option("--limit", min=1)] = None,
+) -> None:
+    """Run canonical Gemini transcription v3; dry run performs no provider call."""
+    settings = _load_settings(env_file)
+    if settings.worker_id is None:
+        typer.echo("Worker-ID fehlt.", err=True)
+        raise typer.Exit(2)
+    try:
+        status, run_dir = run_transcription_v3(
+            pdf_path=pdf,
+            source_id=source_id,
+            worker_id=settings.worker_id,
+            output_root=output_root,
+            planner_mode=planner_mode,
+            gemini_concurrency=gemini_concurrency,
+            dry_run=dry_run,
+            limit=limit,
+            resume_run=resume_run,
+        )
+    except (ValueError, FileExistsError) as exc:
+        typer.echo(f"Transkription v3 fehlgeschlagen: {exc}", err=True)
+        raise typer.Exit(4) from exc
+    typer.echo(f"Status: {status}")
+    typer.echo(f"Run-Verzeichnis: {run_dir}")
+
+
+@app.command("structure-guideline")
+def structure_guideline(
+    transcription_run: Annotated[Path, typer.Option("--transcription-run")],
+    output_root: Annotated[Path, typer.Option("--output-root")],
+    env_file: EnvFileOption = None,
+    resume_run: Annotated[Path | None, typer.Option("--resume-run")] = None,
+    limit: Annotated[int | None, typer.Option("--limit", min=1)] = None,
+) -> None:
+    """Run GPT semantic structuring from canonical transcript only."""
+    settings = _load_settings(env_file)
+    if settings.worker_id is None:
+        typer.echo("Worker-ID fehlt.", err=True)
+        raise typer.Exit(2)
+    try:
+        run_dir = run_semantic_structure(
+            transcription_run=transcription_run,
+            output_root=output_root,
+            worker_id=settings.worker_id,
+            api_key=settings.openai_api_key,
+            resume_run=resume_run,
+            limit=limit,
+        )
+    except (ValueError, FileExistsError) as exc:
+        typer.echo(f"Strukturierung v3 fehlgeschlagen: {exc}", err=True)
+        raise typer.Exit(4) from exc
+    typer.echo(f"Structure-Run-Verzeichnis: {run_dir}")
+
+
+@app.command("run-guideline-end-to-end-v3")
+def run_guideline_end_to_end_v3_command(
+    pdf: Annotated[Path, typer.Option("--pdf")],
+    source_id: Annotated[str, typer.Option("--source-id")],
+    output_root: Annotated[Path, typer.Option("--output-root")],
+    env_file: EnvFileOption = None,
+    resume_run: Annotated[Path | None, typer.Option("--resume-run")] = None,
+    start_date: Annotated[str | None, typer.Option("--start-date")] = None,
+    end_date: Annotated[str | None, typer.Option("--end-date")] = None,
+    planner_mode: Annotated[str, typer.Option("--planner-mode")] = "deterministic",
+    gemini_concurrency: Annotated[int, typer.Option("--gemini-concurrency", min=1, max=4)] = 1,
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+    limit: Annotated[int | None, typer.Option("--limit", min=1)] = None,
+) -> None:
+    """Run the versioned v3 guideline pipeline with mocked providers in dry/test paths."""
+    settings = _load_settings(env_file)
+    if settings.worker_id is None:
+        typer.echo("Worker-ID fehlt.", err=True)
+        raise typer.Exit(2)
+    try:
+        run_dir = run_guideline_end_to_end_v3(
+            pdf=pdf,
+            source_id=source_id,
+            output_root=output_root,
+            worker_id=settings.worker_id,
+            env_file=env_file,
+            resume_run=resume_run,
+            start_date_override=start_date,
+            end_date_override=end_date,
+            planner_mode=planner_mode,
+            gemini_concurrency=gemini_concurrency,
+            dry_run=dry_run,
+            limit=limit,
+            openai_api_key=settings.openai_api_key,
+        )
+    except (ValueError, FileExistsError) as exc:
+        typer.echo(f"End-to-End-v3 fehlgeschlagen: {exc}", err=True)
+        raise typer.Exit(4) from exc
+    typer.echo(f"End-to-End-v3-Run-Verzeichnis: {run_dir}")
+
+
 @app.command("generate-pubmed-searches")
 def generate_pubmed_searches(
     input_run: Annotated[Path, typer.Option("--input-run")],
     output_root: Annotated[Path, typer.Option("--output-root")],
     env_file: EnvFileOption = None,
     start_date: Annotated[
-        str, typer.Option("--start-date", help="Inclusive publication start date (YYYY-MM-DD).")
-    ] = "2023-01-01",
+        str | None,
+        typer.Option(
+            "--start-date",
+            help="Inclusive publication start date override; defaults to publication-year Jan 1.",
+        ),
+    ] = None,
     end_date: Annotated[
         str | None,
         typer.Option("--end-date", help="Inclusive publication end date; defaults to today."),
@@ -379,7 +521,10 @@ def generate_pubmed_searches(
         typer.echo("Worker-ID oder OPENAI_API_KEY fehlt.", err=True)
         raise typer.Exit(2)
     try:
-        parsed_start = date.fromisoformat(start_date)
+        parsed_start, start_date_audit = derive_start_date_from_extraction_manifest(
+            input_run,
+            override=date.fromisoformat(start_date) if start_date else None,
+        )
         parsed_end = date.fromisoformat(end_date) if end_date else date.today()
         run_dir = generate_searches(
             input_run=input_run,
@@ -390,6 +535,7 @@ def generate_pubmed_searches(
             end_date=parsed_end,
             resume_run=resume_run,
             limit=limit,
+            start_date_audit=start_date_audit,
         )
     except (ValueError, FileExistsError, RuntimeError) as exc:
         typer.echo(f"Search-Generierung fehlgeschlagen: {exc}", err=True)

@@ -1,0 +1,10 @@
+Structure the canonical Gemini transcript into guideline source objects.
+
+Use only the supplied transcript, deterministic page metadata, generic layout information, table
+transcripts, and algorithm transcripts. Do not request, infer from, or cite the original PDF bytes
+or any PDF URI.
+
+Copy all original source strings exactly into exact_original_* fields. Classify and link formal
+items, comments, rationales, references, tables, and algorithms, but never silently rewrite source
+wording. Treat recommendations, statements, consensus statements, expert consensus, and other
+source-native formal items as one chronological backbone.

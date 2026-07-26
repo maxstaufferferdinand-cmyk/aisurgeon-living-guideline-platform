@@ -21,7 +21,11 @@ Practice Guidelines remain excluded.
 
 `formal_item_search_coverage.jsonl` contains one row per FormalItem. Missing coverage is a hard
 failure. A non-literature-relevant item remains visible with an explicit exclusion reason.
-`pubmed_queries.jsonl` keeps `query_core` separate from every technical filter.
+`pubmed_queries.jsonl` keeps `query_core` separate from every technical filter. The default
+`start_date` is derived deterministically from the structured extraction publication year:
+`publication_year=2016` produces `2016-01-01`, `publication_year=2023` produces `2023-01-01`.
+Missing or impossible years hard-fail before PubMed unless the user supplies an explicit audited
+`--start-date` override. The override is part of the fingerprint and manifest.
 
 Query builder v4 composes the core, date, and evidence-type constraints as one positive Boolean
 group. The Animals/Humans and guideline filters follow as standalone `NOT (...)` exclusions;

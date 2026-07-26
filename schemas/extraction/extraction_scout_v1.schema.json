@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ExtractionScoutV1ModelOutput",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["declared_page_count", "regions", "warnings"],
+  "properties": {
+    "declared_page_count": {"type": "integer", "minimum": 1},
+    "regions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["region_kind", "page_start", "page_end"],
+        "properties": {
+          "region_kind": {
+            "enum": [
+              "front_matter",
+              "table_of_contents",
+              "normal_prose",
+              "single_column",
+              "multi_column",
+              "dense_region",
+              "bibliography",
+              "appendix",
+              "table",
+              "algorithm",
+              "decision_tree",
+              "scanned_image_heavy",
+              "layout_change"
+            ]
+          },
+          "page_start": {"type": "integer", "minimum": 1},
+          "page_end": {"type": "integer", "minimum": 1},
+          "notes": {"type": ["string", "null"]}
+        }
+      }
+    },
+    "warnings": {"type": "array", "items": {"type": "string"}}
+  }
+}

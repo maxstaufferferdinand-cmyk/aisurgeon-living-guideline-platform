@@ -30,6 +30,32 @@ MODEL_CONFIG_PATH = PROJECT_ROOT / "config/models/openai_pubmed_search_v1.json"
 PROMPT_PATH = PROJECT_ROOT / "config/prompts/openai_pubmed_search_units_v1.txt"
 
 
+def derive_start_date_from_extraction_manifest(
+    input_run: Path, *, override: date | None = None
+) -> tuple[date, dict[str, Any]]:
+    """Derive Jan 1 of publication year unless an audited override is supplied."""
+    if override is not None:
+        return override, {"source": "explicit_override", "override": override.isoformat()}
+    manifest_path = input_run.resolve() / "extraction_manifest.json"
+    if not manifest_path.is_file():
+        raise ValueError("extraction_manifest.json is required to derive PubMed start date")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    year = manifest.get("publication_year")
+    if not isinstance(year, int) or year < 1900 or year > 2200:
+        document_map_path = input_run.resolve() / "document_map.validated.json"
+        if document_map_path.is_file():
+            year = json.loads(document_map_path.read_text(encoding="utf-8")).get(
+                "publication_year"
+            )
+    if not isinstance(year, int) or year < 1900 or year > 2200:
+        raise ValueError("Missing or impossible publication year blocks automatic PubMed fetch")
+    return date(year, 1, 1), {
+        "source": manifest.get("publication_year_source") or "extraction_manifest",
+        "publication_year": year,
+        "override": None,
+    }
+
+
 def ensure_external_run_root(output_root: Path, immutable_input_run: Path) -> Path:
     """Reject repository and immutable-input destinations before creating outputs."""
     resolved = output_root.resolve()
@@ -168,6 +194,7 @@ def generate_searches(
     end_date: date,
     resume_run: Path | None = None,
     limit: int | None = None,
+    start_date_audit: dict[str, Any] | None = None,
     client_factory: Callable[[SecretStr, dict[str, Any]], Any] = OpenAISearchClient,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> Path:
@@ -202,6 +229,12 @@ def generate_searches(
         raise ValueError("Extraction manifest source_id does not match formal_items.jsonl")
     if start_date > end_date:
         raise ValueError("start_date must not be after end_date")
+    if start_date_audit is None:
+        derived_start_date, start_date_audit = derive_start_date_from_extraction_manifest(
+            input_run, override=start_date
+        )
+        if derived_start_date != start_date:
+            raise ValueError("Derived PubMed start date mismatch")
     fingerprint = {
         "source_id": next(iter(source_ids)),
         "input_extraction_run": str(input_run.resolve()),
@@ -212,6 +245,7 @@ def generate_searches(
         "prompt_hash": sha256_text(prompt),
         "query_builder_version": QUERY_BUILDER_VERSION,
         "start_date": start_date.isoformat(),
+        "start_date_audit": start_date_audit,
         "end_date": end_date.isoformat(),
         "humans_filter": HUMANS_FILTER,
         "evidence_type_filter": EVIDENCE_TYPE_FILTER,

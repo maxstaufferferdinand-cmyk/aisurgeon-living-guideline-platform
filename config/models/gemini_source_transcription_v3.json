@@ -1,0 +1,19 @@
+{
+  "provider": "google",
+  "api": "generate_content",
+  "model_id": "gemini-3.5-flash",
+  "thinking_level": "medium",
+  "media_resolution": "high",
+  "prompt_version": "gemini_source_transcription_v3",
+  "schema_version": "canonical_transcription_v3",
+  "request_timeout_seconds": 1800,
+  "max_attempts": 6,
+  "retry_initial_delay_seconds": 15,
+  "retry_backoff_multiplier": 2.0,
+  "retry_max_delay_seconds": 900,
+  "retry_jitter_fraction": 0.25,
+  "global_cooldown_after_consecutive_transient_failures": 3,
+  "global_cooldown_seconds": 900,
+  "default_concurrency": 1,
+  "max_concurrency": 4
+}

@@ -5,13 +5,11 @@ reviewable living-guideline workflows.
 
 ## Current status
 
-This repository now contains the tested foundations for canonical, verbatim guideline extraction:
-typed source objects, deterministic page-window planning, IDs, reference/review logic, and safe
-outputs build on the Phase-3 PDF registration and Gemini boundary. The completed GERD-v2 extraction
-is the immutable input for this phase. GPT search planning, NCBI retrieval, deterministic candidate
-generation, abstract mapping, item-level synthesis, reference consolidation, and deterministic DOCX
-generation are implemented with mock tests. Source Lock, targeted repair, databases, web APIs, MCP,
-and deployment infrastructure remain outside the current pilot scope.
+This repository now contains the v3 foundations for canonical Gemini transcription and downstream
+living-guideline processing. Gemini is the source transcription layer only. GPT semantic
+structuring runs later from the canonical transcript and emits the familiar extraction files for
+Search, PubMed Fetch, Mapping, Synthesis, references, and DOCX. Existing GERD/EoE runs are immutable
+legacy artifacts; v3 does not rewrite or reinterpret them.
 
 ## Binding architecture and roles
 
@@ -157,7 +155,7 @@ uv run aisurgeon generate-pubmed-searches \
   --input-run "/path/to/immutable-extraction-run" \
   --output-root "/path/outside/repository/runs" \
   --env-file ".env" \
-  --start-date 2023-01-01 --end-date 2026-07-14
+  --end-date 2026-07-14
 
 uv run aisurgeon fetch-pubmed \
   --input-run "/path/to/generated-search-run" \
@@ -169,7 +167,9 @@ Both commands accept `--resume-run`; only an identical fingerprint is accepted. 
 `--limit N` processes only the first N chronological FormalItems and marks coverage incomplete;
 that Search run cannot be fetched. On fetch, `--limit N` caps PMIDs per query and creates a
 `technical_limited` run whose fingerprint cannot resume as a complete run. An explicitly selected
-repository-root `.env` works as `--env-file ".env"`; it is never loaded automatically. See
+repository-root `.env` works as `--env-file ".env"`; it is never loaded automatically. The default
+Search start date is January 1 of the extracted guideline publication year; `--start-date` is an
+audited override and is included in the fingerprint. See
 [PubMed search and fetch architecture](docs/architecture/pubmed_search_and_fetch.md).
 
 ## Complete run through final abstract mapping
@@ -227,6 +227,68 @@ in-text citations.
 
 Live-pilot validation, Source Lock, targeted repair, PostgreSQL, Redis, FastAPI, MCP, and
 deployment infrastructure remain planned work after the pilot gates.
+
+## Canonical transcription v3
+
+Provider checks are explicit and secret-free. In Codex/test runs they are mocked and do not call
+Gemini, OpenAI, or NCBI:
+
+```bash
+uv run aisurgeon provider-preflight --env-file /path/to/local/.env
+```
+
+Run source-only canonical transcription:
+
+```bash
+uv run aisurgeon transcribe-guideline \
+  --pdf /path/to/guideline.pdf \
+  --source-id <confirmed-source-id> \
+  --output-root /path/outside/the/repository/runs \
+  --env-file /path/to/local/.env \
+  --planner-mode hybrid \
+  --gemini-concurrency 1
+```
+
+Run semantic structuring from the transcript only:
+
+```bash
+uv run aisurgeon structure-guideline \
+  --transcription-run /path/to/transcription-v3-run \
+  --output-root /path/outside/the/repository/runs \
+  --env-file /path/to/local/.env
+```
+
+Run the versioned v3 pipeline:
+
+```bash
+uv run aisurgeon run-guideline-end-to-end-v3 \
+  --pdf /path/to/guideline.pdf \
+  --source-id <confirmed-source-id> \
+  --output-root /path/outside/the/repository/runs \
+  --env-file /path/to/local/.env \
+  --planner-mode hybrid \
+  --gemini-concurrency 1
+```
+
+Gemini v3 output is limited to faithful visual source transcription with generic layout labels.
+Python injects `source_id`, schema/prompt versions, job IDs, page maps, and stable IDs. GPT later
+classifies recommendations, statements, comments, bibliography entries, tables, and algorithms from
+the transcript without receiving the original PDF.
+
+The normal v3 workflow does not use late Gemini reference repair. The existing repair commands are
+legacy/manual recovery tools for historic runs.
+
+For the later S2k neuroendocrine-tumour pilot, after real provider preflight outside Codex:
+
+```bash
+uv run aisurgeon run-guideline-end-to-end-v3 \
+  --pdf /path/to/S2k-neuroendocrine-tumour-guideline.pdf \
+  --source-id <confirmed-source-id> \
+  --output-root /mnt/c/living_guideline_platform/runs \
+  --env-file /path/to/local/.env \
+  --planner-mode hybrid \
+  --gemini-concurrency 1
+```
 
 ## Canonical extraction dry run
 

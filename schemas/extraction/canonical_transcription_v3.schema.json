@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CanonicalTranscriptionV3ModelOutput",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "represented_original_pdf_pages",
+    "detected_reading_order",
+    "visual_blocks",
+    "continuation_from_previous_page",
+    "continuation_to_next_page",
+    "unreadable_regions",
+    "visual_uncertainties"
+  ],
+  "properties": {
+    "represented_original_pdf_pages": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "integer", "minimum": 1}
+    },
+    "detected_reading_order": {"type": "string"},
+    "visual_blocks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["page_number", "reading_order_index", "block_type", "exact_visible_text"],
+        "properties": {
+          "page_number": {"type": "integer", "minimum": 1},
+          "reading_order_index": {"type": "integer", "minimum": 1},
+          "block_type": {
+            "enum": [
+              "heading",
+              "paragraph",
+              "list",
+              "table",
+              "caption",
+              "footnote",
+              "page_header",
+              "page_footer",
+              "diagram_text",
+              "other_visible_text"
+            ]
+          },
+          "exact_visible_text": {"type": "string"},
+          "table_html": {"type": ["string", "null"]},
+          "uncertainty": {"type": ["string", "null"]}
+        }
+      }
+    },
+    "continuation_from_previous_page": {"type": "boolean"},
+    "continuation_to_next_page": {"type": "boolean"},
+    "unreadable_regions": {"type": "array", "items": {"type": "string"}},
+    "visual_uncertainties": {"type": "array", "items": {"type": "string"}}
+  }
+}

@@ -1,0 +1,12 @@
+Visually read the supplied physical PDF slice and transcribe only visible source content.
+
+Preserve reading order, wording, spelling, punctuation, headings, lists, indentation where
+meaningful, inline literature markers, footnotes, headers, footers, tables, captions, figure labels,
+algorithm text, and genuinely unreadable or ambiguous regions.
+
+Use only generic visual block labels: heading, paragraph, list, table, caption, footnote,
+page_header, page_footer, diagram_text, other_visible_text.
+
+Do not create or infer clinical semantic labels, recommendation classes, comments, rationales,
+stable IDs, source IDs, schema versions, prompt versions, publication years, PubMed queries,
+evidence classes, or clinical conclusions.

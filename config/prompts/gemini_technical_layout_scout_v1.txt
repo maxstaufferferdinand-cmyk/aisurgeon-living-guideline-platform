@@ -1,0 +1,8 @@
+Inspect the whole PDF only for non-semantic technical layout planning.
+
+Identify approximate page ranges for front matter, table of contents, prose regions,
+single-column regions, multi-column regions, dense regions, bibliography, appendices, tables,
+algorithms, decision trees, scanned or image-heavy pages, and abrupt layout changes.
+
+Do not extract full clinical text. Do not label recommendations, statements, comments, rationales,
+or clinical meaning. Do not emit source IDs, schema versions, prompt versions, or stable IDs.
