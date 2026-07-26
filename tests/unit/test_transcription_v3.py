@@ -31,6 +31,7 @@ from aisurgeon.extraction.transcription_v3.models import (
 )
 from aisurgeon.extraction.transcription_v3.pipeline import (
     GeminiTranscriptionProvider,
+    gemini_request_schema,
     inject_source_content_metadata,
     run_transcription_v3,
 )
@@ -94,6 +95,26 @@ def test_gemini_transcription_draft_has_no_semantic_or_technical_fields() -> Non
     for forbidden in ("source_id", "schema_version", "job_id", "chunk_id"):
         with pytest.raises(ValidationError):
             SourceContentDraft.model_validate({**draft.model_dump(), forbidden: "bad"})
+
+
+def test_gemini_request_schemas_remove_unsupported_fields_recursively() -> None:
+    for model in (ExtractionScoutDraft, SourceContentDraft):
+        schema = gemini_request_schema(model)
+        encoded = json.dumps(schema, sort_keys=True)
+        assert "additionalProperties" not in encoded
+        assert "additional_properties" not in encoded
+        assert "$defs" not in encoded
+        assert "$ref" not in encoded
+        assert "title" not in encoded
+        assert "default" not in encoded
+    scout_schema = gemini_request_schema(ExtractionScoutDraft)
+    region_items = scout_schema["properties"]["regions"]["items"]
+    assert region_items["type"] == "object"
+    assert "properties" in region_items
+    source_schema = gemini_request_schema(SourceContentDraft)
+    block_items = source_schema["properties"]["visual_blocks"]["items"]
+    assert block_items["type"] == "object"
+    assert block_items["properties"]["table_html"]["nullable"] is True
 
 
 def test_python_injects_technical_metadata_deterministically() -> None:
@@ -690,7 +711,11 @@ def test_sdk_boundary_passes_inline_pdf_bytes_to_gemini(
             assert contents[0].inline_data.mime_type == "application/pdf"
             assert contents[0].inline_data.data == synthetic_pdf.read_bytes()
             assert config.response_mime_type == "application/json"
-            assert config.response_schema is SourceContentDraft
+            assert config.response_schema is None
+            assert isinstance(config.response_json_schema, dict)
+            encoded_schema = json.dumps(config.response_json_schema, sort_keys=True)
+            assert "additionalProperties" not in encoded_schema
+            assert "additional_properties" not in encoded_schema
             assert str(config.thinking_config.thinking_level.value) == "MEDIUM"
             assert str(config.media_resolution.value) == "MEDIA_RESOLUTION_MEDIUM"
             assert config.temperature is None
@@ -733,6 +758,189 @@ def test_sdk_boundary_passes_inline_pdf_bytes_to_gemini(
     assert client.files.upload_called is False
     assert provider.evidence[0].pdf_slice_hash is not None
     assert provider.evidence[0].prompt_hash is not None
+
+
+def test_scout_uses_uploaded_pdf_and_cleaned_schema(synthetic_pdf: Path) -> None:
+    class Remote:
+        uri = "fake://uploaded"
+        mime_type = "application/pdf"
+        name = "files/fake"
+
+    class Response:
+        text = ExtractionScoutDraft(declared_page_count=1, regions=[]).model_dump_json()
+        id = "scout-response"
+        request_id = "scout-request"
+        finish_reason = "STOP"
+
+        def __init__(self) -> None:
+            self.usage_metadata = {"total_token_count": 2}
+
+    class Files:
+        def __init__(self) -> None:
+            self.uploaded: list[Path] = []
+            self.deleted: list[str] = []
+
+        def upload(self, *, file: Path) -> Remote:
+            self.uploaded.append(file)
+            return Remote()
+
+        def delete(self, *, name: str) -> None:
+            self.deleted.append(name)
+
+    class Models:
+        def __init__(self) -> None:
+            self.contents: list | None = None
+            self.config = None
+
+        def generate_content(self, *, model: str, contents: list, config) -> Response:
+            assert model == "gemini-3.5-flash"
+            assert contents[0].uri == "fake://uploaded"
+            assert contents[1] == "scout prompt"
+            encoded_schema = json.dumps(config.response_json_schema, sort_keys=True)
+            assert "additionalProperties" not in encoded_schema
+            assert "additional_properties" not in encoded_schema
+            self.contents = contents
+            self.config = config
+            return Response()
+
+    class Client:
+        def __init__(self) -> None:
+            self.files = Files()
+            self.models = Models()
+
+    client = Client()
+    provider = GeminiTranscriptionProvider(
+        api_key=__import__("pydantic").SecretStr("dummy"),
+        model_config={
+            "model_id": "gemini-3.5-flash",
+            "request_timeout_seconds": 1800,
+            "thinking_level": "medium",
+            "media_resolution": "profile_based",
+            "max_attempts": 1,
+            "retry_initial_delay_seconds": 1,
+            "retry_max_delay_seconds": 1,
+            "retry_jitter_fraction": 0,
+        },
+        client=client,
+    )
+    draft = provider.scout(synthetic_pdf, "scout prompt")
+    assert draft.declared_page_count == 1
+    assert client.files.uploaded == [synthetic_pdf]
+    assert client.files.deleted == ["files/fake"]
+
+
+def test_http_400_invalid_argument_is_non_retryable_and_preserves_safe_metadata(
+    synthetic_pdf: Path,
+) -> None:
+    class InvalidArgumentError(Exception):
+        status_code = 400
+        status = "INVALID_ARGUMENT"
+
+    class Models:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def generate_content(self, *, model: str, contents: list, config) -> None:
+            self.calls += 1
+            raise InvalidArgumentError("Invalid JSON payload received.")
+
+    class Client:
+        def __init__(self) -> None:
+            self.files = object()
+            self.models = Models()
+
+    sleeps: list[float] = []
+    client = Client()
+    provider = GeminiTranscriptionProvider(
+        api_key=__import__("pydantic").SecretStr("dummy"),
+        model_config={
+            "model_id": "gemini-3.5-flash",
+            "request_timeout_seconds": 1800,
+            "thinking_level": "medium",
+            "media_resolution": "profile_based",
+            "max_attempts": 3,
+            "retry_initial_delay_seconds": 1,
+            "retry_max_delay_seconds": 1,
+            "retry_jitter_fraction": 0,
+        },
+        client=client,
+        sleep=sleeps.append,
+    )
+    job = TranscriptionJob(
+        job_id="job",
+        chunk_id="chunk",
+        profile="single_column_prose_verbatim",
+        primary_pages=[1],
+        reason="test",
+    )
+    with pytest.raises(InvalidArgumentError):
+        provider.transcribe(synthetic_pdf, "prompt", job)
+    assert client.models.calls == 1
+    assert sleeps == []
+    evidence = provider.evidence[0]
+    assert evidence.http_status == 400
+    assert evidence.api_status == "INVALID_ARGUMENT"
+    assert evidence.final_failure_category == "non_retryable_provider_or_local_failure"
+    assert evidence.safe_error_class == "InvalidArgumentError"
+    assert evidence.safe_error_message == "Invalid JSON payload received."
+
+
+def test_gemini_candidate_finish_reason_is_retained(synthetic_pdf: Path) -> None:
+    class Reason:
+        value = "STOP"
+
+    class Candidate:
+        finish_reason = Reason()
+
+    class Response:
+        text = SourceContentDraft(
+            represented_original_pdf_pages=[1],
+            detected_reading_order="monotonic",
+            visual_blocks=[
+                VisualBlock(
+                    page_number=1,
+                    reading_order_index=1,
+                    block_type="paragraph",
+                    exact_visible_text="Source text.",
+                )
+            ],
+        ).model_dump_json()
+
+        def __init__(self) -> None:
+            self.candidates = [Candidate()]
+
+    class Models:
+        def generate_content(self, *, model: str, contents: list, config) -> Response:
+            return Response()
+
+    class Client:
+        def __init__(self) -> None:
+            self.files = object()
+            self.models = Models()
+
+    provider = GeminiTranscriptionProvider(
+        api_key=__import__("pydantic").SecretStr("dummy"),
+        model_config={
+            "model_id": "gemini-3.5-flash",
+            "request_timeout_seconds": 1800,
+            "thinking_level": "medium",
+            "media_resolution": "profile_based",
+            "max_attempts": 1,
+            "retry_initial_delay_seconds": 1,
+            "retry_max_delay_seconds": 1,
+            "retry_jitter_fraction": 0,
+        },
+        client=Client(),
+    )
+    job = TranscriptionJob(
+        job_id="job",
+        chunk_id="chunk",
+        profile="single_column_prose_verbatim",
+        primary_pages=[1],
+        reason="test",
+    )
+    provider.transcribe(synthetic_pdf, "prompt", job)
+    assert provider.evidence[0].finish_reason == "STOP"
 
 
 def test_openai_responses_arguments_are_created() -> None:

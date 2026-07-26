@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
-from pydantic import SecretStr, ValidationError
+from pydantic import BaseModel, SecretStr, ValidationError
 from pypdf import PdfReader, PdfWriter
 
 from aisurgeon.extraction.canonical.outputs import write_json, write_jsonl
@@ -99,6 +99,70 @@ def _load_v3_config(project_root: Path) -> dict[str, Any]:
     return json.loads((project_root / MODEL_CONFIG_PATH).read_text(encoding="utf-8"))
 
 
+def gemini_request_schema(model: type[BaseModel]) -> dict[str, Any]:
+    """Return a Gemini request schema while preserving strict local validation."""
+    schema = model.model_json_schema()
+    definitions = schema.get("$defs", {})
+    unsupported = {
+        "$defs",
+        "$schema",
+        "additionalProperties",
+        "additional_properties",
+        "default",
+        "description",
+        "examples",
+        "title",
+    }
+
+    def resolve_ref(ref: str) -> Any:
+        prefix = "#/$defs/"
+        if not ref.startswith(prefix):
+            raise ValueError(f"Unsupported schema reference: {ref}")
+        name = ref.removeprefix(prefix)
+        if name not in definitions:
+            raise ValueError(f"Unresolved schema reference: {ref}")
+        return clean(definitions[name])
+
+    def clean(value: Any) -> Any:
+        if isinstance(value, dict):
+            if "$ref" in value:
+                resolved = resolve_ref(str(value["$ref"]))
+                merged = {key: item for key, item in value.items() if key != "$ref"}
+                if merged:
+                    if not isinstance(resolved, dict):
+                        raise ValueError("Referenced schema cannot be merged")
+                    resolved = {**resolved, **clean(merged)}
+                return resolved
+            any_of = value.get("anyOf")
+            if isinstance(any_of, list):
+                non_null = [
+                    option
+                    for option in any_of
+                    if not (isinstance(option, dict) and option.get("type") == "null")
+                ]
+                if len(non_null) == 1 and len(non_null) != len(any_of):
+                    result = clean(non_null[0])
+                    if isinstance(result, dict):
+                        result["nullable"] = True
+                    return result
+            result = {
+                key: clean(item)
+                for key, item in value.items()
+                if key not in unsupported and key != "anyOf"
+            }
+            if "const" in result:
+                result["enum"] = [result.pop("const")]
+            return result
+        if isinstance(value, list):
+            return [clean(item) for item in value]
+        return value
+
+    cleaned = clean(schema)
+    if not isinstance(cleaned, dict):
+        raise ValueError("Gemini request schema must be an object")
+    return cleaned
+
+
 def _safe_usage(usage: Any) -> dict[str, int] | None:
     if usage is None:
         return None
@@ -120,6 +184,20 @@ def _safe_usage(usage: Any) -> dict[str, int] | None:
     if isinstance(usage, dict):
         values.update({key: value for key, value in usage.items() if isinstance(value, int)})
     return values or None
+
+
+def _safe_finish_reason(response: Any) -> str | None:
+    direct = getattr(response, "finish_reason", None)
+    if direct:
+        value = getattr(direct, "value", direct)
+        return str(value)
+    candidates = getattr(response, "candidates", None)
+    if isinstance(candidates, list) and candidates:
+        reason = getattr(candidates[0], "finish_reason", None)
+        if reason:
+            value = getattr(reason, "value", reason)
+            return str(value)
+    return None
 
 
 def _safe_status(exc: Exception) -> tuple[int | None, str | None, float | None]:
@@ -208,7 +286,7 @@ class GeminiTranscriptionProvider:
             ),
             media_resolution=_media_resolution_enum(media_resolution),
             response_mime_type="application/json",
-            response_schema=schema_model,
+            response_json_schema=gemini_request_schema(schema_model),
             http_options=types.HttpOptions(
                 timeout=int(self.model_config["request_timeout_seconds"]) * 1000
             ),
@@ -252,7 +330,7 @@ class GeminiTranscriptionProvider:
             request_id=getattr(response, "request_id", None),
             response_id=getattr(response, "id", None),
             token_usage=_safe_usage(getattr(response, "usage_metadata", None)),
-            finish_reason=str(getattr(response, "finish_reason", "") or "") or None,
+            finish_reason=_safe_finish_reason(response),
             duration_seconds=round(time.monotonic() - start, 3),
             http_status=http_status,
             api_status=api_status,
