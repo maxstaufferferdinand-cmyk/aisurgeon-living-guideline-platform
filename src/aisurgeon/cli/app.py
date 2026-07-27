@@ -571,6 +571,13 @@ def generate_pubmed_searches(
             ),
         ),
     ] = None,
+    allow_limited_input: Annotated[
+        bool,
+        typer.Option(
+            "--allow-limited-input",
+            help="Accept a technical_limited v3 structure run for a bounded test subset.",
+        ),
+    ] = False,
 ) -> None:
     """Generate GPT semantic search blocks and deterministic PubMed queries."""
     settings = _load_settings(env_file)
@@ -581,6 +588,7 @@ def generate_pubmed_searches(
         parsed_start, start_date_audit = derive_start_date_from_extraction_manifest(
             input_run,
             override=date.fromisoformat(start_date) if start_date else None,
+            allow_limited_input=allow_limited_input,
         )
         parsed_end = date.fromisoformat(end_date) if end_date else date.today()
         run_dir = generate_searches(
@@ -593,6 +601,7 @@ def generate_pubmed_searches(
             resume_run=resume_run,
             limit=limit,
             start_date_audit=start_date_audit,
+            allow_limited_input=allow_limited_input,
         )
     except (ValueError, FileExistsError, RuntimeError) as exc:
         typer.echo(f"Search-Generierung fehlgeschlagen: {exc}", err=True)
@@ -625,6 +634,13 @@ def fetch_pubmed_command(
             ),
         ),
     ] = None,
+    allow_limited_input: Annotated[
+        bool,
+        typer.Option(
+            "--allow-limited-input",
+            help="Accept a technical_limited Search run for a bounded test subset.",
+        ),
+    ] = False,
 ) -> None:
     """Fetch existing PubMed queries through official NCBI E-Utilities."""
     settings = _load_settings(env_file)
@@ -643,6 +659,7 @@ def fetch_pubmed_command(
             limit=limit,
             expected_start_date=start_date,
             expected_end_date=end_date,
+            allow_limited_input=allow_limited_input,
         )
     except (ValueError, FileExistsError, RuntimeError) as exc:
         typer.echo(f"PubMed-Abruf fehlgeschlagen: {exc}", err=True)
@@ -697,7 +714,24 @@ def build_updated_guideline_command(
     output_root: Annotated[Path, typer.Option("--output-root")],
     env_file: EnvFileOption = None,
     resume_run: Annotated[Path | None, typer.Option("--resume-run")] = None,
+    reuse_synthesis_run: Annotated[
+        Path | None,
+        typer.Option(
+            "--reuse-synthesis-run",
+            help=(
+                "Reuse prior per-item synthesis decisions and rebuild packets, "
+                "references, DOCX, and QA."
+            ),
+        ),
+    ] = None,
     limit: Annotated[int | None, typer.Option("--limit", min=1)] = None,
+    technical_limited_document: Annotated[
+        bool,
+        typer.Option(
+            "--technical-limited-document",
+            help="Generate a clearly labelled limited test DOCX from technical_limited inputs.",
+        ),
+    ] = False,
 ) -> None:
     """Build synthesis, references, and final updated guideline DOCX."""
     settings = _load_settings(env_file)
@@ -714,7 +748,9 @@ def build_updated_guideline_command(
             worker_id=settings.worker_id,
             api_key=settings.openai_api_key,
             resume_run=resume_run,
+            reuse_synthesis_run=reuse_synthesis_run,
             limit=limit,
+            technical_limited_document=technical_limited_document,
         )
     except (ValueError, FileExistsError, RuntimeError) as exc:
         typer.echo(f"Leitlinien-Synthese fehlgeschlagen: {exc}", err=True)

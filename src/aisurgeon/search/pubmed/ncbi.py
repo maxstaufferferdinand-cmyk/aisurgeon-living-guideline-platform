@@ -485,6 +485,7 @@ def fetch_pubmed(
     limit: int | None = None,
     expected_start_date: str | None = None,
     expected_end_date: str | None = None,
+    allow_limited_input: bool = False,
     client_factory: Callable[..., Any] = NcbiClient,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> Path:
@@ -495,7 +496,7 @@ def fetch_pubmed(
     if not search_manifest_path.is_file():
         raise ValueError("Search run has no search_manifest.json")
     search_manifest = json.loads(search_manifest_path.read_text(encoding="utf-8"))
-    if search_manifest.get("run_mode") != "complete":
+    if search_manifest.get("run_mode") != "complete" and not allow_limited_input:
         raise ValueError("A technical limited Search run cannot be used for PubMed fetch")
     queries = _validated_queries(query_path)
     starts = {query.get("start_date") for query in queries}
@@ -519,6 +520,7 @@ def fetch_pubmed(
         "ncbi_tool": tool,
         "api_key_configured": api_key is not None,
         "email_configured": True,
+        "allow_limited_input": allow_limited_input,
     }
     if resume_run:
         run_dir = resume_run.resolve()
@@ -739,8 +741,8 @@ def fetch_pubmed(
         if fatal_fetch
         else (
             "technical_limited"
-            if limit is not None
-            else ("completed_with_review" if has_soft_warnings else "completed")
+                if limit is not None or allow_limited_input
+                else ("completed_with_review" if has_soft_warnings else "completed")
         )
     )
     _write_json_output(
@@ -750,7 +752,12 @@ def fetch_pubmed(
             "worker_id": worker_id,
             "created_at": now().isoformat(),
             "status": status,
-            "run_mode": "technical_limited" if limit is not None else "complete",
+            "run_mode": (
+                "technical_limited"
+                if limit is not None or allow_limited_input
+                else "complete"
+            ),
+            "limited_input_accepted": allow_limited_input,
             "limit_per_query": limit,
             "ncbi_configuration": {
                 "api_key": "set" if api_key else "missing",

@@ -172,12 +172,29 @@ def _article_public(article: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _comment_texts(item: dict[str, Any], comments_by_id: dict[str, dict[str, Any]]) -> list[str]:
-    return [
-        comments_by_id[cid]["exact_original_text"]
-        for cid in item.get("linked_comment_ids", [])
-        if cid in comments_by_id
-    ]
+NO_ORIGINAL_COMMENT_TEXT = "Kein Originalkommentar im extrahierten Quellabschnitt vorhanden."
+
+
+def _linked_comments(
+    item: dict[str, Any], comments: list[dict[str, Any]], comments_by_id: dict[str, dict[str, Any]]
+) -> list[dict[str, Any]]:
+    linked: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for cid in item.get("linked_comment_ids", []):
+        key = str(cid)
+        if key in comments_by_id and key not in seen:
+            linked.append(comments_by_id[key])
+            seen.add(key)
+    original_number = str(item.get("original_number") or "")
+    if original_number:
+        for comment in comments:
+            cid = str(comment.get("comment_id") or "")
+            if cid in seen:
+                continue
+            if str(comment.get("related_original_number") or "") == original_number:
+                linked.append(comment)
+                seen.add(cid)
+    return linked
 
 
 def _reference_lookup(references: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -226,6 +243,7 @@ def build_item_evidence_packets(
         ref_objects, unresolved = _reference_objects(
             [str(x) for x in item.get("inline_reference_numbers", [])], refs_by_number
         )
+        linked_comments = _linked_comments(item, comments, comments_by_id)
         packet = {
             "schema_version": PACKET_VERSION,
             "source_id": source_id,
@@ -241,7 +259,11 @@ def build_item_evidence_packets(
             "original_level_of_evidence": item.get("evidence_level_raw"),
             "original_consensus": item.get("consensus_raw"),
             "original_status": item.get("status_raw"),
-            "exact_original_comments": _comment_texts(item, comments_by_id),
+            "linked_comment_ids": [comment["comment_id"] for comment in linked_comments],
+            "exact_original_comments": [
+                comment["exact_original_text"] for comment in linked_comments
+            ],
+            "original_comment_count": len(linked_comments),
             "original_inline_reference_ids": item.get("inline_reference_numbers", []),
             "original_reference_objects": ref_objects,
             "direct_article_pmids": direct_pmids,
@@ -458,7 +480,9 @@ def build_updated_blocks(
                 "normalized_item_family": packet["normalized_item_family"],
                 "section_path": packet["section_path"],
                 "exact_original_item_text": packet["exact_original_item_text"],
+                "linked_comment_ids": packet["linked_comment_ids"],
                 "exact_original_comments": packet["exact_original_comments"],
+                "original_comment_count": packet["original_comment_count"],
                 "new_evidence_de": synthesis["new_evidence_de"],
                 "aisurgeon_evidence_class": synthesis["aisurgeon_evidence_class"],
                 "conclusion_de": synthesis["conclusion_de"],
@@ -481,6 +505,29 @@ def build_updated_blocks(
             }
         )
     return blocks
+
+
+def _load_reusable_syntheses(reuse_synthesis_run: Path | None) -> dict[str, dict[str, Any]]:
+    if reuse_synthesis_run is None:
+        return {}
+    path = reuse_synthesis_run.resolve() / "updated_guideline_blocks.jsonl"
+    if not path.is_file():
+        raise ValueError("reuse_synthesis_run does not contain updated_guideline_blocks.jsonl")
+    reusable: dict[str, dict[str, Any]] = {}
+    for block in load_jsonl(path):
+        reusable[str(block["formal_item_id"])] = {
+            "new_evidence_de": block["new_evidence_de"],
+            "conclusion_de": block["conclusion_de"],
+            "decision": block["decision"],
+            "updated_item_text_de": block["updated_item_text_de"],
+            "aisurgeon_evidence_class": block["aisurgeon_evidence_class"],
+            "used_direct_pmids": block.get("used_direct_pmids", []),
+            "used_indirect_pmids": block.get("used_indirect_pmids", []),
+            "used_context_pmids": block.get("used_context_pmids", []),
+            "review_required": block.get("review_required", False),
+            "review_notes": block.get("review_notes", []),
+        }
+    return reusable
 
 
 def _normalize_title(title: str | None) -> str:
@@ -653,6 +700,47 @@ def _citation(numbers: list[int]) -> str:
     return "[" + ", ".join(ranges) + "]"
 
 
+def _old_section_label(block: dict[str, Any]) -> str:
+    raw = str(block.get("source_native_item_type") or block.get("normalized_item_family") or "Item")
+    lowered = raw.casefold()
+    if "statement" in lowered:
+        return "Altes Statement"
+    if "experten" in lowered or "expert" in lowered:
+        return "Alter Expertenkonsens"
+    if "konsens" in lowered and "empfehl" not in lowered:
+        return "Alter Konsens"
+    return "Alte Empfehlung"
+
+
+def _new_section_label(block: dict[str, Any]) -> str:
+    raw = str(block.get("source_native_item_type") or block.get("normalized_item_family") or "Item")
+    lowered = raw.casefold()
+    prefix = "Neue Empfehlung"
+    if "statement" in lowered:
+        prefix = "Neues Statement"
+    elif "experten" in lowered or "expert" in lowered:
+        prefix = "Neuer Expertenkonsens"
+    elif "konsens" in lowered and "empfehl" not in lowered:
+        prefix = "Neuer Konsens"
+    if block["decision"] == "modified":
+        return f"{prefix} / automatisierter Aktualisierungsvorschlag"
+    return f"{prefix} / fortbestehend unverändert"
+
+
+def _decision_label(decision: str) -> str:
+    return {
+        "insufficient_new_evidence": "unzureichende neue Evidenz",
+        "unchanged": "unverändert",
+        "rationale_updated": "Begründung aktualisiert",
+        "modified": "geändert",
+    }.get(decision, decision)
+
+
+def _block_comments(block: dict[str, Any]) -> list[str]:
+    comments = list(block.get("exact_original_comments") or [])
+    return comments or [NO_ORIGINAL_COMMENT_TEXT]
+
+
 def render_blocks_markdown(blocks: list[dict[str, Any]], number_map: dict[str, Any]) -> str:
     lines = ["# Aktualisierte Leitlinienblöcke", ""]
     for block in blocks:
@@ -667,13 +755,24 @@ def render_blocks_markdown(blocks: list[dict[str, Any]], number_map: dict[str, A
             [
                 f"## {block['original_item_number']} - {block['source_native_item_type']}",
                 "",
-                block["exact_original_item_text"] + (f" {citation}" if citation else ""),
+                f"**{_old_section_label(block)}**",
                 "",
-                f"**Neue Evidenz:** {block['new_evidence_de']}",
+                block["exact_original_item_text"],
+                "",
+                f"**{_new_section_label(block)}**",
+                "",
+                block["updated_item_text_de"] + (f" {citation}" if citation else ""),
+                "",
+                "**Alter Kommentar**",
+                "",
+                "\n\n".join(_block_comments(block)),
+                "",
+                f"**Neue Evidenz:** {block['new_evidence_de']}"
+                + (f" {citation}" if citation else ""),
                 "",
                 f"**Schlussfolgerung:** {block['conclusion_de']}",
                 "",
-                f"**Entscheidung:** {block['decision']}",
+                f"**Entscheidung:** {block['decision']} - {_decision_label(block['decision'])}",
                 "",
             ]
         )
@@ -689,7 +788,10 @@ def _w_p(
     if jc:
         props.append(f'<w:jc w:val="{jc}"/>')
     ppr = f"<w:pPr>{''.join(props)}</w:pPr>" if props else ""
-    rpr = "<w:rPr><w:b/></w:rPr>" if bold else ""
+    run_props = ['<w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:cs="Arial" w:eastAsia="Arial"/>']
+    if bold:
+        run_props.append("<w:b/>")
+    rpr = f"<w:rPr>{''.join(run_props)}</w:rPr>"
     return f'<w:p>{ppr}<w:r>{rpr}<w:t xml:space="preserve">{escape(text)}</w:t></w:r></w:p>'
 
 
@@ -714,8 +816,11 @@ def _w_box(title: str, text: str, *, changed: bool = False) -> str:
 def _docx_xml(
     blocks: list[dict[str, Any]], refs: list[dict[str, Any]], summary: dict[str, Any]
 ) -> str:
+    document_title = str(
+        summary.get("document_title") or "AISurgeon Aktualisierte Leitlinie GERD/EoE 2026"
+    )
     body = [
-        _w_p("AISurgeon Aktualisierte Leitlinie GERD/EoE 2026", style="Title"),
+        _w_p(document_title, style="Title"),
         _w_p("Automatisch unterstützter wissenschaftlicher Aktualisierungsentwurf"),
         _w_p("Nicht als konsentierte AWMF-Leitlinie verwenden."),
         '<w:p><w:r><w:br w:type="page"/></w:r></w:p>',
@@ -772,28 +877,33 @@ def _docx_xml(
             ]
             if value
         )
-        if meta:
-            body.append(_w_p(meta))
         if block["decision"] == "modified":
-            body.append(_w_box("Bisheriger Originalwortlaut", block["exact_original_item_text"]))
+            body.append(_w_box(_old_section_label(block), block["exact_original_item_text"]))
             body.append(
                 _w_box(
-                    "Aktualisierungsvorschlag - KI-gestuetzt; nicht freigegeben",
+                    _new_section_label(block),
                     block["updated_item_text_de"],
                     changed=True,
                 )
             )
         else:
-            label = f"Fortbestehendes Item ({block['source_native_item_type']})"
-            body.append(_w_box(label, block["exact_original_item_text"]))
-        for comment in block["exact_original_comments"]:
-            body.append(_w_p("Bisherige Begründung", style="Heading3"))
+            body.append(_w_box(_old_section_label(block), block["exact_original_item_text"]))
+            body.append(_w_box(_new_section_label(block), block["updated_item_text_de"]))
+        if meta:
+            body.append(_w_p(meta))
+        body.append(_w_p("Alter Kommentar", style="Heading3"))
+        for comment in _block_comments(block):
             body.append(_w_p(comment, jc="both"))
         body.append(_w_p("Neue Evidenz", style="Heading3"))
         body.append(_w_p(block["new_evidence_de"], jc="both"))
         body.append(_w_p("Schlussfolgerung", style="Heading3"))
         body.append(_w_p(block["conclusion_de"], jc="both"))
-        body.append(_w_p(f"Entscheidung: {block['decision']}", bold=True))
+        body.append(
+            _w_p(
+                f"Entscheidung: {block['decision']} - {_decision_label(block['decision'])}",
+                bold=True,
+            )
+        )
     body.extend(
         [
             '<w:p><w:r><w:br w:type="page"/></w:r></w:p>',
@@ -835,22 +945,43 @@ def _styles_xml() -> str:
     return (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
         '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        '<w:docDefaults><w:rPrDefault><w:rPr>'
+        '<w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:cs="Arial" w:eastAsia="Arial"/>'
+        '<w:sz w:val="24"/></w:rPr></w:rPrDefault></w:docDefaults>'
         '<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/>'
-        '<w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="24"/></w:rPr>'
+        '<w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:cs="Arial" w:eastAsia="Arial"/>'
+        '<w:sz w:val="24"/></w:rPr>'
         '<w:pPr><w:spacing w:after="120" w:line="360" w:lineRule="auto"/>'
         '<w:jc w:val="both"/></w:pPr></w:style>'
         '<w:style w:type="paragraph" w:styleId="Title"><w:name w:val="Title"/>'
         '<w:rPr><w:b/><w:sz w:val="32"/>'
-        '<w:rFonts w:ascii="Arial" w:hAnsi="Arial"/></w:rPr></w:style>'
+        '<w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:cs="Arial" w:eastAsia="Arial"/>'
+        '</w:rPr></w:style>'
         '<w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/>'
         '<w:basedOn w:val="Normal"/><w:uiPriority w:val="9"/><w:qFormat/>'
-        '<w:rPr><w:b/><w:color w:val="1F4E79"/><w:sz w:val="32"/></w:rPr></w:style>'
+        '<w:rPr><w:b/><w:color w:val="1F4E79"/><w:sz w:val="32"/>'
+        '<w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:cs="Arial" w:eastAsia="Arial"/>'
+        '</w:rPr></w:style>'
         '<w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="heading 2"/>'
         '<w:basedOn w:val="Normal"/><w:qFormat/><w:rPr><w:b/><w:color w:val="1F4E79"/>'
-        '<w:sz w:val="28"/></w:rPr></w:style>'
+        '<w:sz w:val="28"/>'
+        '<w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:cs="Arial" w:eastAsia="Arial"/>'
+        '</w:rPr></w:style>'
         '<w:style w:type="paragraph" w:styleId="Heading3"><w:name w:val="heading 3"/>'
-        '<w:basedOn w:val="Normal"/><w:qFormat/><w:rPr><w:b/><w:sz w:val="24"/></w:rPr></w:style>'
+        '<w:basedOn w:val="Normal"/><w:qFormat/><w:rPr><w:b/><w:sz w:val="24"/>'
+        '<w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:cs="Arial" w:eastAsia="Arial"/>'
+        '</w:rPr></w:style>'
         "</w:styles>"
+    )
+
+
+def _font_table_xml() -> str:
+    return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<w:fonts xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        '<w:font w:name="Arial"><w:panose1 w:val="020B0604020202020204"/>'
+        '<w:charset w:val="00"/><w:family w:val="swiss"/>'
+        '<w:pitch w:val="variable"/></w:font></w:fonts>'
     )
 
 
@@ -876,6 +1007,7 @@ def write_docx(
         f'<Relationships xmlns="{pkg_rel}">'
         f'<Relationship Id="rIdHeader1" Type="{office_rel}/header" Target="header1.xml"/>'
         f'<Relationship Id="rIdFooter1" Type="{office_rel}/footer" Target="footer1.xml"/>'
+        f'<Relationship Id="rIdFontTable" Type="{office_rel}/fontTable" Target="fontTable.xml"/>'
         "</Relationships>"
     )
     content_types = (
@@ -886,6 +1018,7 @@ def write_docx(
         '<Default Extension="xml" ContentType="application/xml"/>'
         f'<Override PartName="/word/document.xml" ContentType="{app_ct}.document.main+xml"/>'
         f'<Override PartName="/word/styles.xml" ContentType="{app_ct}.styles+xml"/>'
+        f'<Override PartName="/word/fontTable.xml" ContentType="{app_ct}.fontTable+xml"/>'
         f'<Override PartName="/word/header1.xml" ContentType="{app_ct}.header+xml"/>'
         f'<Override PartName="/word/footer1.xml" ContentType="{app_ct}.footer+xml"/>'
         '<Override PartName="/docProps/core.xml" '
@@ -903,12 +1036,15 @@ def write_docx(
         f"{_w_p('Seite X von Y | Automatisch unterstützter Entwurf - ')}"
         f"{_w_p('menschliche Validierung erforderlich')}</w:ftr>"
     )
+    document_title = escape(
+        str(summary.get("document_title") or "AISurgeon Aktualisierte Leitlinie GERD/EoE 2026")
+    )
     core = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
         '<cp:coreProperties '
         'xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" '
         'xmlns:dc="http://purl.org/dc/elements/1.1/">'
-        "<dc:title>AISurgeon Aktualisierte Leitlinie GERD/EoE 2026</dc:title>"
+        f"<dc:title>{document_title}</dc:title>"
         "<dc:creator>AISurgeon Living Guideline Platform</dc:creator>"
         "</cp:coreProperties>"
     )
@@ -918,6 +1054,7 @@ def write_docx(
         archive.writestr("word/_rels/document.xml.rels", doc_rels)
         archive.writestr("word/document.xml", _docx_xml(blocks, refs, summary))
         archive.writestr("word/styles.xml", _styles_xml())
+        archive.writestr("word/fontTable.xml", _font_table_xml())
         archive.writestr("word/header1.xml", header)
         archive.writestr("word/footer1.xml", footer)
         archive.writestr("docProps/core.xml", core)
@@ -960,6 +1097,7 @@ def run_docx_qa(docx_path: Path, run_dir: Path) -> dict[str, Any]:
             "[Content_Types].xml",
             "word/document.xml",
             "word/styles.xml",
+            "word/fontTable.xml",
             "word/header1.xml",
             "word/footer1.xml",
         }
@@ -969,6 +1107,24 @@ def run_docx_qa(docx_path: Path, run_dir: Path) -> dict[str, Any]:
         document_xml = archive.read("word/document.xml").decode("utf-8")
         if "Heading1" not in document_xml or "TOC" not in document_xml:
             report["critical_layout_errors"].append("Heading styles or TOC field missing")
+        for label in [
+            "Alte Empfehlung",
+            "Neue Empfehlung",
+            "Alter Kommentar",
+            "Neue Evidenz",
+            "Schlussfolgerung",
+        ]:
+            if label not in document_xml:
+                report["critical_layout_errors"].append(f"Required visible label missing: {label}")
+        for part in [
+            "word/document.xml",
+            "word/styles.xml",
+            "word/fontTable.xml",
+            "word/header1.xml",
+            "word/footer1.xml",
+        ]:
+            if part in names and "Calibri" in archive.read(part).decode("utf-8"):
+                report["critical_layout_errors"].append(f"Calibri present in {part}")
         if any(term in document_xml for term in PUBLIC_FORBIDDEN_TERMS):
             report["critical_layout_errors"].append("Forbidden public-term marker present")
         report["structural_valid"] = not report["critical_layout_errors"]
@@ -1010,6 +1166,8 @@ def build_updated_guideline(
     api_key: SecretStr,
     resume_run: Path | None = None,
     limit: int | None = None,
+    technical_limited_document: bool = False,
+    reuse_synthesis_run: Path | None = None,
     client_factory: Callable[[SecretStr, dict[str, Any]], Any] = OpenAISynthesisClient,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> Path:
@@ -1053,8 +1211,14 @@ def build_updated_guideline(
             (mapping_run, "mapping_manifest.json"),
         ]
     ]
-    if any(m.get("status") not in {"completed", "completed_with_review"} for m in manifests):
+    allowed_statuses = {"completed", "completed_with_review"}
+    if technical_limited_document:
+        allowed_statuses.add("technical_limited")
+    if any(m.get("status") not in allowed_statuses for m in manifests):
         raise ValueError("Input manifest is not completed")
+    limited_input = any(m.get("run_mode") == "technical_limited" for m in manifests)
+    if limited_input and not technical_limited_document:
+        raise ValueError("Limited upstream runs require technical_limited_document=True")
     source_id = _source_id_from_records(formal)
     if any(str(m.get("source_id")) != source_id for m in manifests):
         raise ValueError("source_id mismatch between synthesis inputs")
@@ -1080,6 +1244,8 @@ def build_updated_guideline(
         "git_commit": _git_commit(),
         "worker_id": worker_id,
         "limit": limit,
+        "technical_limited_document": technical_limited_document,
+        "reuse_synthesis_run": str(reuse_synthesis_run.resolve()) if reuse_synthesis_run else None,
     }
     if resume_run:
         run_dir = resume_run.resolve()
@@ -1113,7 +1279,8 @@ def build_updated_guideline(
     checkpoint_dir.mkdir(exist_ok=True)
     fingerprint_hash = _json_hash(fingerprint)
     syntheses: dict[str, dict[str, Any]] = {}
-    client = client_factory(api_key, config)
+    reusable_syntheses = _load_reusable_syntheses(reuse_synthesis_run)
+    client: Any | None = None
     for packet in selected_packets:
         fid = packet["formal_item_id"]
         checkpoint = checkpoint_dir / f"{fid.replace('/', '_')}.json"
@@ -1123,10 +1290,14 @@ def build_updated_guideline(
                 raise ValueError("Checkpoint fingerprint is incompatible")
             syntheses[fid] = saved["synthesis"]
             continue
-        if not (packet["direct_article_pmids"] or packet["indirect_article_pmids"]):
+        if fid in reusable_syntheses:
+            synthesis = validate_synthesis(reusable_syntheses[fid], packet)
+        elif not (packet["direct_article_pmids"] or packet["indirect_article_pmids"]):
             synthesis = _fallback_synthesis(packet)
         else:
             synthesis = None
+            if client is None:
+                client = client_factory(api_key, config)
             payload = _client_payload(packet, digests_by_item[fid])
             for attempt in range(1, int(config["max_attempts"]) + 1):
                 try:
@@ -1172,6 +1343,11 @@ def build_updated_guideline(
     decision_counts = Counter(block["decision"] for block in blocks)
     summary = {
         "source_id": source_id,
+        "document_title": (
+            "LIMITED TEST OUTPUT - AISurgeon NET technical limited pilot subset"
+            if technical_limited_document
+            else "AISurgeon Aktualisierte Leitlinie GERD/EoE 2026"
+        ),
         "formal_items": len(formal),
         "processed_formal_items": len(blocks),
         "insufficient_new_evidence": decision_counts["insufficient_new_evidence"],
@@ -1191,8 +1367,13 @@ def build_updated_guideline(
     _write_xlsx(run_dir / "synthesis_review_findings.xlsx", "synthesis_review", synthesis_findings)
     write_jsonl(run_dir / "reference_review_findings.jsonl", reference_findings)
     _write_xlsx(run_dir / "reference_review_findings.xlsx", "reference_review", reference_findings)
-    docx_path = run_dir / "AISurgeon_Aktualisierte_Leitlinie_GERD_EoE_2026.docx"
-    if limit is None:
+    docx_name = (
+        "AISurgeon_LIMITED_TEST_OUTPUT_NET_subset_comments_arial_fixed.docx"
+        if technical_limited_document
+        else "AISurgeon_Aktualisierte_Leitlinie_GERD_EoE_2026.docx"
+    )
+    docx_path = run_dir / docx_name
+    if limit is None or technical_limited_document:
         write_docx(docx_path, blocks, refs, summary)
         qa = run_docx_qa(docx_path, run_dir)
     else:
@@ -1208,7 +1389,7 @@ def build_updated_guideline(
     write_json(run_dir / "synthesis_summary.json", summary)
     status = (
         "technical_limited"
-        if limit is not None
+        if limit is not None or technical_limited_document or limited_input
         else (
             "completed_with_review"
             if synthesis_findings or reference_findings or qa.get("warnings")
@@ -1221,7 +1402,12 @@ def build_updated_guideline(
             **fingerprint,
             "created_at": now().isoformat(),
             "status": status,
-            "run_mode": "technical_limited" if limit is not None else "complete",
+            "run_mode": (
+                "technical_limited"
+                if limit is not None or technical_limited_document or limited_input
+                else "complete"
+            ),
+            "technical_limited_document": technical_limited_document,
             "summary": summary,
             "credential_status": {"OPENAI_API_KEY": "set"},
             "output_files": {

@@ -44,15 +44,144 @@ SYNTHETIC_MARKERS = (
 class SemanticStructureDraft(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    document_metadata: dict[str, Any] = Field(default_factory=dict)
+    document_metadata: "SemanticDocumentMetadataDraft" = Field(
+        default_factory=lambda: SemanticDocumentMetadataDraft()
+    )
     publication_year: int | None = None
     publication_year_source: str | None = None
-    formal_items: list[dict[str, Any]] = Field(default_factory=list)
-    comments: list[dict[str, Any]] = Field(default_factory=list)
-    references: list[dict[str, Any]] = Field(default_factory=list)
-    tables: list[dict[str, Any]] = Field(default_factory=list)
-    algorithms: list[dict[str, Any]] = Field(default_factory=list)
-    review_findings: list[dict[str, Any]] = Field(default_factory=list)
+    formal_items: list["SemanticFormalItemDraft"] = Field(default_factory=list)
+    comments: list["SemanticCommentDraft"] = Field(default_factory=list)
+    references: list["SemanticReferenceDraft"] = Field(default_factory=list)
+    tables: list["SemanticVisualObjectDraft"] = Field(default_factory=list)
+    algorithms: list["SemanticVisualObjectDraft"] = Field(default_factory=list)
+    review_findings: list["SemanticReviewFindingDraft"] = Field(default_factory=list)
+
+
+class SemanticDocumentMetadataDraft(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_id: str | None = None
+    title: str | None = None
+    publication_year_raw: str | None = None
+    version_information: str | None = None
+    notes: list[str] = Field(default_factory=list)
+
+
+class SemanticFormalItemDraft(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    item_type: str
+    item_type_raw: str | None = None
+    original_number: str | None = None
+    topic_or_short_title_raw: str | None = None
+    exact_original_text: str
+    page_start: int = Field(ge=1)
+    page_end: int = Field(ge=1)
+    extraction_confidence: float = Field(ge=0, le=1)
+    review_required: bool = False
+    review_reasons: list[str] = Field(default_factory=list)
+    chapter_path_raw: list[str] = Field(default_factory=list)
+    recommendation_grade_raw: str | None = None
+    evidence_level_raw: str | None = None
+    consensus_raw: str | None = None
+    status_raw: str | None = None
+    year_raw: str | None = None
+    inline_reference_numbers: list[str] = Field(default_factory=list)
+    unresolved_reference_numbers: list[str] = Field(default_factory=list)
+
+
+class SemanticCommentDraft(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    exact_original_text: str
+    page_start: int = Field(ge=1)
+    page_end: int = Field(ge=1)
+    extraction_confidence: float = Field(ge=0, le=1)
+    review_required: bool = False
+    review_reasons: list[str] = Field(default_factory=list)
+    comment_type_raw: str | None = None
+    related_original_number: str | None = None
+    related_formal_item_type_raw: str | None = None
+    inline_reference_numbers: list[str] = Field(default_factory=list)
+    unresolved_reference_numbers: list[str] = Field(default_factory=list)
+    chapter_path_raw: list[str] = Field(default_factory=list)
+
+
+class SemanticReferenceDraft(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    original_reference_number: str
+    exact_original_reference_text: str
+    page_start: int = Field(ge=1)
+    page_end: int = Field(ge=1)
+    extraction_confidence: float = Field(ge=0, le=1)
+    review_required: bool = False
+    review_reasons: list[str] = Field(default_factory=list)
+
+
+class SemanticVisualObjectDraft(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title_or_caption_raw: str | None = None
+    source_anchor_description: str
+    page_start: int = Field(ge=1)
+    page_end: int = Field(ge=1)
+    extraction_confidence: float = Field(ge=0, le=1)
+    review_required: bool = False
+    review_reasons: list[str] = Field(default_factory=list)
+    linked_original_item_numbers: list[str] = Field(default_factory=list)
+
+
+class SemanticReviewFindingDraft(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    finding_id: str
+    stage: str = "semantic_structure"
+    severity: str
+    issue_code: str
+    issue_message: str
+    source_id: str
+    object_type: str | None = None
+    object_id: str | None = None
+    original_number: str | None = None
+    page_start: int | None = None
+    page_end: int | None = None
+    workflow_continued: bool = True
+    human_review_required: bool = True
+    suggested_action: str | None = None
+    review_status: str = "open"
+    review_note: str | None = None
+
+
+SemanticStructureDraft.model_rebuild()
+
+
+def _dump(value: Any) -> dict[str, Any]:
+    return value.model_dump(mode="json") if hasattr(value, "model_dump") else dict(value)
+
+
+def _canonical_formal_item_payload(item: Any) -> dict[str, Any]:
+    value = _dump(item)
+    item_type = str(value.get("item_type") or "other_formal_item")
+    if item_type not in {"recommendation", "statement", "other_formal_item"}:
+        value["item_type_raw"] = value.get("item_type_raw") or item_type
+        value["item_type"] = "statement" if "statement" in item_type else "other_formal_item"
+    return value
+
+
+def _canonical_review_finding_payload(finding: Any) -> dict[str, Any]:
+    value = _dump(finding)
+    severity = str(value.get("severity") or "").casefold()
+    if severity in {"critical", "fatal"}:
+        value["severity"] = "error"
+    elif severity in {"major", "moderate"}:
+        value["severity"] = "warning"
+    elif severity in {"minor", "low"}:
+        value["severity"] = "info"
+    status = str(value.get("review_status") or "").casefold()
+    if status in {"pending", "todo", "new"}:
+        value["review_status"] = "open"
+    return value
 
 
 def build_semantic_payload(transcription_run: Path) -> dict[str, Any]:
@@ -154,6 +283,13 @@ def _safe_usage(usage: Any) -> dict[str, int] | None:
     return values or None
 
 
+def _transcription_manifest(transcription_run: Path) -> dict[str, Any]:
+    manifest_path = transcription_run / "transcription_manifest.json"
+    if not manifest_path.is_file():
+        raise ValueError("Transcription manifest missing")
+    return json.loads(manifest_path.read_text(encoding="utf-8"))
+
+
 class OpenAISemanticStructureProvider:
     """Live OpenAI Responses boundary for semantic structuring."""
 
@@ -218,10 +354,7 @@ class OpenAISemanticStructureProvider:
 def _assert_transcription_compatible(
     transcription_run: Path, execution_mode: ExecutionMode
 ) -> None:
-    manifest_path = transcription_run / "transcription_manifest.json"
-    if not manifest_path.is_file():
-        raise ValueError("Transcription manifest missing")
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest = _transcription_manifest(transcription_run)
     if execution_mode == "live":
         if manifest.get("execution_mode") != "live":
             raise ValueError("Live semantic structuring requires a live transcription run")
@@ -234,6 +367,27 @@ def _assert_transcription_compatible(
 def _contains_synthetic_marker(draft: SemanticStructureDraft) -> bool:
     encoded = draft.model_dump_json()
     return any(marker in encoded for marker in SYNTHETIC_MARKERS)
+
+
+def _no_formal_item_finding(source_id: str) -> ReviewFinding:
+    return ReviewFinding(
+        finding_id=f"{source_id}_STRUCTURE_NO_FORMAL_ITEMS",
+        stage="semantic_structure",
+        severity="info",
+        issue_code="no_formal_items_in_limited_transcript",
+        issue_message=(
+            "No formal recommendation, statement, consensus statement, or expert consensus item "
+            "was visible in this limited transcript."
+        ),
+        source_id=source_id,
+        workflow_continued=True,
+        human_review_required=False,
+        suggested_action="Use a clinical page range for the next limited test.",
+    )
+
+
+def _pubmed_default_start(publication_year: int | None) -> str | None:
+    return derive_pubmed_start_date(publication_year) if publication_year is not None else None
 
 
 def run_semantic_structure(
@@ -250,6 +404,7 @@ def run_semantic_structure(
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> Path:
     _assert_transcription_compatible(transcription_run, execution_mode)
+    source_manifest = _transcription_manifest(transcription_run)
     payload = build_semantic_payload(transcription_run)
     source_id = payload["canonical_transcript"]["source_id"]
     if resume_run is None:
@@ -269,6 +424,7 @@ def run_semantic_structure(
             raise ValueError("Live semantic structuring produced no OpenAI provider evidence")
         if _contains_synthetic_marker(draft):
             raise ValueError("Synthetic fixture marker detected in live semantic structure output")
+        write_json(run_dir / "openai_semantic_structure.raw.json", draft)
     elif execution_mode == "mock_test":
         draft = (draft_factory or _default_draft)(payload)
     elif execution_mode == "dry_run":
@@ -293,7 +449,7 @@ def run_semantic_structure(
     items = [
         FormalItem.model_validate(
             {
-                **item,
+                **_canonical_formal_item_payload(item),
                 "source_id": source_id,
                 "schema_version": CANONICAL_EXTRACTION_SCHEMA_VERSION,
                 "extraction_batch_id": f"{source_id}_STRUCTURE_V3",
@@ -307,7 +463,7 @@ def run_semantic_structure(
     comments = [
         Comment.model_validate(
             {
-                **comment,
+                **_dump(comment),
                 "source_id": source_id,
                 "schema_version": CANONICAL_EXTRACTION_SCHEMA_VERSION,
                 "extraction_batch_id": f"{source_id}_STRUCTURE_V3",
@@ -322,7 +478,7 @@ def run_semantic_structure(
     refs = [
         Reference.model_validate(
             {
-                **ref,
+                **_dump(ref),
                 "source_id": source_id,
                 "schema_version": CANONICAL_EXTRACTION_SCHEMA_VERSION,
             }
@@ -334,11 +490,11 @@ def run_semantic_structure(
     tables = [
         VisualObject.model_validate(
             {
-                **table,
+                **_dump(table),
                 "source_id": source_id,
                 "schema_version": CANONICAL_EXTRACTION_SCHEMA_VERSION,
                 "object_type": "table",
-                "extraction_confidence": table.get("extraction_confidence", 1.0),
+                "extraction_confidence": _dump(table).get("extraction_confidence", 1.0),
             }
         )
         for table in draft.tables
@@ -346,19 +502,21 @@ def run_semantic_structure(
     algorithms = [
         VisualObject.model_validate(
             {
-                **algorithm,
+                **_dump(algorithm),
                 "source_id": source_id,
                 "schema_version": CANONICAL_EXTRACTION_SCHEMA_VERSION,
                 "object_type": "algorithm",
-                "extraction_confidence": algorithm.get("extraction_confidence", 1.0),
+                "extraction_confidence": _dump(algorithm).get("extraction_confidence", 1.0),
             }
         )
         for algorithm in draft.algorithms
     ]
     findings = [
-        ReviewFinding.model_validate(finding)
+        ReviewFinding.model_validate(_canonical_review_finding_payload(finding))
         for finding in draft.review_findings
     ]
+    if execution_mode == "live" and not items:
+        findings.append(_no_formal_item_finding(source_id))
     write_jsonl(run_dir / "formal_items.jsonl", items)
     write_jsonl(run_dir / "recommendations.jsonl", recommendation_view(items))
     write_jsonl(run_dir / "statements.jsonl", statement_view(items))
@@ -381,7 +539,7 @@ def run_semantic_structure(
         "mock_test"
         if execution_mode == "mock_test"
         else "technical_limited"
-        if limit is not None
+        if limit is not None or source_manifest.get("status") == "technical_limited"
         else "completed"
     )
     write_json(
@@ -420,7 +578,8 @@ def run_semantic_structure(
             "prompt_version": SEMANTIC_STRUCTURE_PROMPT_VERSION,
             "publication_year": draft.publication_year,
             "publication_year_source": draft.publication_year_source,
-            "pubmed_default_start_date": derive_pubmed_start_date(draft.publication_year),
+            "pubmed_default_start_date": _pubmed_default_start(draft.publication_year),
+            "input_transcription_status": source_manifest.get("status"),
             "credential_status": {"OPENAI_API_KEY": "set" if api_key else "not_used"},
             "limit": limit,
         },

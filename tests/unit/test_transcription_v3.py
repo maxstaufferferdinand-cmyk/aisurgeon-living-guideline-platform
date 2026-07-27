@@ -623,6 +623,138 @@ def test_live_semantic_structure_uses_openai_provider(
     assert manifest["provider_backend"] == "openai_responses"
     assert manifest["provider_call_count"] == 1
     assert manifest["publication_year"] == 2018
+    assert manifest["status"] == "completed"
+    assert (run / "openai_semantic_structure.raw.json").is_file()
+
+
+def test_live_structure_from_limited_transcription_remains_technical_limited(
+    synthetic_pdf: Path, tmp_path: Path
+) -> None:
+    _, tx_run = run_transcription_v3(
+        pdf_path=synthetic_pdf,
+        source_id="SRC",
+        worker_id="worker",
+        output_root=tmp_path / "runs",
+        execution_mode="live",
+        provider=_FakeGeminiProvider(),  # type: ignore[arg-type]
+        max_jobs=1,
+    )
+
+    class NoItemOpenAIProvider:
+        def __init__(self) -> None:
+            self.evidence = [
+                {
+                    "provider_backend": "openai_responses",
+                    "success": True,
+                    "response_id": "resp_1",
+                    "token_usage": {"total_tokens": 10},
+                    "duration_seconds": 0.1,
+                }
+            ]
+
+        def create(self, *, prompt: str, payload: dict) -> SemanticStructureDraft:
+            return SemanticStructureDraft(
+                document_metadata={"title": "Real limited page"},
+                publication_year=None,
+                publication_year_source=None,
+                formal_items=[],
+                review_findings=[],
+            )
+
+    run = run_semantic_structure(
+        transcription_run=tx_run,
+        output_root=tmp_path / "structured",
+        worker_id="worker",
+        execution_mode="live",
+        provider=NoItemOpenAIProvider(),  # type: ignore[arg-type]
+    )
+    manifest = json.loads((run / "extraction_manifest.json").read_text(encoding="utf-8"))
+    summary = json.loads((run / "extraction_summary.json").read_text(encoding="utf-8"))
+    findings = (run / "review_findings.jsonl").read_text(encoding="utf-8")
+    assert manifest["status"] == "technical_limited"
+    assert manifest["pubmed_default_start_date"] is None
+    assert summary["formal_item_count"] == 0
+    assert "no_formal_items_in_limited_transcript" in findings
+
+
+def test_live_structure_normalizes_review_finding_enums(
+    synthetic_pdf: Path, tmp_path: Path
+) -> None:
+    _, tx_run = run_transcription_v3(
+        pdf_path=synthetic_pdf,
+        source_id="SRC",
+        worker_id="worker",
+        output_root=tmp_path / "runs",
+        execution_mode="live",
+        provider=_FakeGeminiProvider(),  # type: ignore[arg-type]
+        max_jobs=1,
+    )
+
+    class FindingOpenAIProvider:
+        def __init__(self) -> None:
+            self.evidence = [{"provider_backend": "openai_responses", "success": True}]
+
+        def create(self, *, prompt: str, payload: dict) -> SemanticStructureDraft:
+            return SemanticStructureDraft(
+                publication_year=2018,
+                publication_year_source="page 1",
+                review_findings=[
+                    {
+                        "finding_id": "RF-001",
+                        "stage": "semantic_structure",
+                        "severity": "critical",
+                        "issue_code": "LIMITED_SOURCE",
+                        "issue_message": "Limited source.",
+                        "source_id": "SRC",
+                        "workflow_continued": True,
+                        "human_review_required": True,
+                        "review_status": "pending",
+                    },
+                    {
+                        "finding_id": "RF-002",
+                        "stage": "semantic_structure",
+                        "severity": "major",
+                        "issue_code": "LIMITED_SOURCE",
+                        "issue_message": "Limited source.",
+                        "source_id": "SRC",
+                        "workflow_continued": True,
+                        "human_review_required": True,
+                        "review_status": "open",
+                    },
+                    {
+                        "finding_id": "RF-003",
+                        "stage": "semantic_structure",
+                        "severity": "minor",
+                        "issue_code": "LIMITED_SOURCE",
+                        "issue_message": "Limited source.",
+                        "source_id": "SRC",
+                        "workflow_continued": True,
+                        "human_review_required": True,
+                        "review_status": "open",
+                    }
+                ],
+            )
+
+    run = run_semantic_structure(
+        transcription_run=tx_run,
+        output_root=tmp_path / "structured",
+        worker_id="worker",
+        execution_mode="live",
+        provider=FindingOpenAIProvider(),  # type: ignore[arg-type]
+    )
+    findings = [
+        json.loads(line)
+        for line in (run / "review_findings.jsonl").read_text().splitlines()
+    ]
+    provider_findings = [
+        finding for finding in findings if finding["finding_id"].startswith("RF-")
+    ]
+    assert [finding["severity"] for finding in provider_findings] == [
+        "error",
+        "warning",
+        "info",
+    ]
+    assert findings[0]["review_status"] == "open"
 
 
 def test_live_semantic_structure_rejects_synthetic_markers(
@@ -995,6 +1127,29 @@ def test_technical_limited_runs_cannot_feed_pubmed(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError):
         derive_start_date_from_extraction_manifest(run)
+
+
+def test_technical_limited_pubmed_start_date_requires_explicit_allowance(
+    tmp_path: Path,
+) -> None:
+    run = tmp_path / "structure"
+    run.mkdir()
+    (run / "extraction_manifest.json").write_text(
+        json.dumps(
+            {
+                "status": "technical_limited",
+                "execution_mode": "live",
+                "publication_year": 2018,
+                "publication_year_source": "page footer",
+            }
+        ),
+        encoding="utf-8",
+    )
+    start_date, audit = derive_start_date_from_extraction_manifest(
+        run, allow_limited_input=True
+    )
+    assert start_date.isoformat() == "2018-01-01"
+    assert audit["limited_input_accepted"] is True
 
 
 def test_legacy_run_path_remains_unmodified() -> None:

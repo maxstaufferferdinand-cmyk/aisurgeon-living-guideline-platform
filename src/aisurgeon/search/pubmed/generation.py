@@ -31,7 +31,7 @@ PROMPT_PATH = PROJECT_ROOT / "config/prompts/openai_pubmed_search_units_v1.txt"
 
 
 def derive_start_date_from_extraction_manifest(
-    input_run: Path, *, override: date | None = None
+    input_run: Path, *, override: date | None = None, allow_limited_input: bool = False
 ) -> tuple[date, dict[str, Any]]:
     """Derive Jan 1 of publication year unless an audited override is supplied."""
     if override is not None:
@@ -40,10 +40,10 @@ def derive_start_date_from_extraction_manifest(
     if not manifest_path.is_file():
         raise ValueError("extraction_manifest.json is required to derive PubMed start date")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if manifest.get("status") is not None and manifest.get("status") not in {
-        "completed",
-        "completed_with_review",
-    }:
+    allowed_statuses = {"completed", "completed_with_review"}
+    if allow_limited_input:
+        allowed_statuses.add("technical_limited")
+    if manifest.get("status") is not None and manifest.get("status") not in allowed_statuses:
         raise ValueError("PubMed start date requires a complete live structure run")
     year = manifest.get("publication_year")
     if not isinstance(year, int) or year < 1900 or year > 2200:
@@ -58,6 +58,7 @@ def derive_start_date_from_extraction_manifest(
         "source": manifest.get("publication_year_source") or "extraction_manifest",
         "publication_year": year,
         "override": None,
+        "limited_input_accepted": allow_limited_input,
     }
 
 
@@ -200,6 +201,7 @@ def generate_searches(
     resume_run: Path | None = None,
     limit: int | None = None,
     start_date_audit: dict[str, Any] | None = None,
+    allow_limited_input: bool = False,
     client_factory: Callable[[SecretStr, dict[str, Any]], Any] = OpenAISearchClient,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> Path:
@@ -228,7 +230,10 @@ def generate_searches(
     if len(source_ids) != 1 or None in source_ids:
         raise ValueError("Formal items require one consistent non-empty source_id")
     extraction_manifest = json.loads(paths["extraction_manifest.json"].read_text(encoding="utf-8"))
-    if extraction_manifest.get("status") not in {"completed", "completed_with_review"}:
+    allowed_input_statuses = {"completed", "completed_with_review"}
+    if allow_limited_input:
+        allowed_input_statuses.add("technical_limited")
+    if extraction_manifest.get("status") not in allowed_input_statuses:
         raise ValueError("Input extraction run is not completed")
     if extraction_manifest.get("source_id") != next(iter(source_ids)):
         raise ValueError("Extraction manifest source_id does not match formal_items.jsonl")
@@ -256,6 +261,7 @@ def generate_searches(
         "evidence_type_filter": EVIDENCE_TYPE_FILTER,
         "exclusion_filter": EXCLUSION_FILTER,
         "limit": limit,
+        "allow_limited_input": allow_limited_input,
     }
     if resume_run:
         run_dir = resume_run.resolve()
@@ -332,10 +338,19 @@ def generate_searches(
             "created_at": now().isoformat(),
             "git_commit": _git_value("rev-parse", "HEAD"),
             "model_configuration": config,
-            "status": "technical_limited" if limit is not None else "completed",
-            "run_mode": "technical_limited" if limit is not None else "complete",
+            "status": (
+                "technical_limited"
+                if limit is not None or allow_limited_input
+                else "completed"
+            ),
+            "run_mode": (
+                "technical_limited"
+                if limit is not None or allow_limited_input
+                else "complete"
+            ),
             "limit": limit,
-            "coverage_complete": limit is None,
+            "coverage_complete": limit is None and not allow_limited_input,
+            "limited_input_accepted": allow_limited_input,
             "credential_status": {"OPENAI_API_KEY": "set"},
             "counts": {
                 "input_formal_items": len(all_formal),

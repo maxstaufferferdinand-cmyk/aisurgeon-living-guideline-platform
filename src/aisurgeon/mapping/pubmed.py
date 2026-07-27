@@ -295,6 +295,7 @@ def map_pubmed_evidence(
     allowed = {"completed", "completed_with_review", "technical_limited"}
     if any(m.get("status") not in allowed for m in manifests):
         raise ValueError("Input manifest is not completed")
+    limited_input = any(m.get("run_mode") == "technical_limited" for m in manifests)
     source_ids = {str(x.get("source_id")) for x in formal} | {
         str(x.get("source_id")) for x in queries
     }
@@ -523,7 +524,7 @@ def map_pubmed_evidence(
                 )
     status = (
         "technical_limited"
-        if limit is not None
+        if limit is not None or limited_input
         else (
             "completed_with_review"
             if findings or any(not x["mapping_complete"] for x in coverage)
@@ -557,7 +558,8 @@ def map_pubmed_evidence(
             "worker_id": worker_id,
             "created_at": now().isoformat(),
             "status": status,
-            "run_mode": "technical_limited" if limit is not None else "complete",
+            "run_mode": "technical_limited" if limit is not None or limited_input else "complete",
+            "limited_input_accepted": limited_input,
             "summary": summary,
             "credential_status": {"OPENAI_API_KEY": "set"},
             "output_files": {

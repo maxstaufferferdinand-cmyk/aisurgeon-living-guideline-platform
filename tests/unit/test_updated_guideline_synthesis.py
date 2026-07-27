@@ -7,6 +7,7 @@ import pytest
 from pydantic import SecretStr
 
 from aisurgeon.synthesis.updated_guideline import (
+    NO_ORIGINAL_COMMENT_TEXT,
     build_item_evidence_packets,
     build_updated_guideline,
     consolidate_references,
@@ -237,6 +238,26 @@ def test_packets_support_all_92_items_and_preserve_source_fields() -> None:
     assert packets[0]["source_native_item_type"] == "NATIVE"
     assert packets[0]["exact_original_item_text"] == "Originaltext 1 mit Abb. 1."
     assert packets[0]["exact_original_comments"] == ["Exakter Kommentar 1"]
+    assert packets[0]["linked_comment_ids"] == ["C1"]
+    assert packets[0]["original_comment_count"] == 1
+
+
+def test_comments_link_by_related_original_number_when_item_links_missing() -> None:
+    item = _formal(1)
+    item["linked_comment_ids"] = []
+    comments = [_comment(2), _comment(1)]
+    packets = build_item_evidence_packets(
+        formal_items=[item],
+        comments=comments,
+        references=[],
+        articles=[],
+        mappings=[],
+        evidence_index=[{"formal_item_id": "F1"}],
+        source_id="SRC",
+    )
+    assert packets[0]["linked_comment_ids"] == ["C1"]
+    assert packets[0]["exact_original_comments"] == ["Exakter Kommentar 1"]
+    assert packets[0]["original_comment_count"] == 1
 
 
 def test_relevance_score_is_ignored_and_only_direct_indirect_drive_decisions(
@@ -421,19 +442,118 @@ def test_docx_structure_unmodified_not_duplicated_modified_separated_and_resume(
     with zipfile.ZipFile(docx) as archive:
         xml = archive.read("word/document.xml").decode("utf-8")
         styles = archive.read("word/styles.xml").decode("utf-8")
+        font_table = archive.read("word/fontTable.xml").decode("utf-8")
         assert "TOC" in xml and "Heading1" in xml
         assert "w:hanging" in xml
-        assert "Bisheriger Originalwortlaut" in xml
-        assert "Aktualisierungsvorschlag" in xml
-        assert xml.count("Originaltext 2 mit Abb. 1.") == 1
+        assert "Alte Empfehlung" in xml
+        assert "Neue Empfehlung / automatisierter Aktualisierungsvorschlag" in xml
+        assert "Alter Kommentar" in xml
+        assert "Neue Evidenz" in xml
+        assert "Schlussfolgerung" in xml
+        assert xml.count("Originaltext 1 mit Abb. 1.") == 1
+        assert xml.count("Aktualisierter Vorschlag.") == 1
+        assert xml.count("Originaltext 2 mit Abb. 1.") == 2
+        assert "Exakter Kommentar 1" in xml
+        assert xml.index("Alte Empfehlung") < xml.index("Neue Empfehlung")
+        assert xml.index("Neue Empfehlung") < xml.index("Alter Kommentar")
+        assert xml.index("Alter Kommentar") < xml.index("Neue Evidenz")
+        assert xml.index("Neue Evidenz") < xml.index("Schlussfolgerung")
         assert "GPT-basiert" not in xml
         assert "Prompt" not in xml
+        assert "Calibri" not in xml
+        assert "Calibri" not in styles
+        assert "Calibri" not in font_table
         assert "word/header1.xml" in archive.namelist()
         assert "word/footer1.xml" in archive.namelist()
-        assert "Arial" in styles
+        assert 'w:ascii="Arial"' in xml
+        assert 'w:eastAsia="Arial"' in styles
+        assert 'w:name="Arial"' in font_table
     qa = json.loads((run / "docx_qa_report.json").read_text())
     assert qa["structural_valid"] is True
     assert not qa["critical_layout_errors"]
+
+
+def test_limited_docx_renders_comments_no_comment_message_and_reuses_synthesis(
+    tmp_path: Path,
+) -> None:
+    extraction, search, fetch, mapping = _runs(tmp_path, item_count=2)
+    comments = [_comment(1)]
+    _jsonl(extraction / "comments.jsonl", comments)
+
+    class Fake:
+        calls = 0
+
+        def create(self, prompt, payload):
+            self.calls += 1
+            return {
+                "new_evidence_de": "Neue direkte Evidenz.",
+                "conclusion_de": "Der Text bleibt unverändert.",
+                "decision": "rationale_updated",
+                "updated_item_text_de": "Originaltext 1 mit Abb. 1.",
+                "aisurgeon_evidence_class": "C",
+                "used_direct_pmids": ["10"],
+                "used_indirect_pmids": [],
+                "used_context_pmids": [],
+                "uncertainty_de": None,
+                "review_required": False,
+                "review_notes": [],
+            }
+
+    first_client = Fake()
+    first = build_updated_guideline(
+        extraction_run=extraction,
+        search_run=search,
+        fetch_run=fetch,
+        mapping_run=mapping,
+        output_root=tmp_path,
+        worker_id="w",
+        api_key=SecretStr("secret"),
+        technical_limited_document=True,
+        client_factory=lambda key, config: first_client,
+        now=lambda: datetime(2026, 7, 16, tzinfo=UTC),
+    )
+
+    class Forbidden:
+        def create(self, prompt, payload):
+            raise AssertionError("OpenAI should not be called during reuse rebuild")
+
+    rebuilt = build_updated_guideline(
+        extraction_run=extraction,
+        search_run=search,
+        fetch_run=fetch,
+        mapping_run=mapping,
+        output_root=tmp_path,
+        worker_id="w",
+        api_key=SecretStr("secret"),
+        technical_limited_document=True,
+        reuse_synthesis_run=first,
+        client_factory=lambda key, config: Forbidden(),
+        now=lambda: datetime(2026, 7, 17, tzinfo=UTC),
+    )
+    assert rebuilt != first
+    blocks = [
+        json.loads(line)
+        for line in (rebuilt / "updated_guideline_blocks.jsonl").read_text().splitlines()
+    ]
+    assert blocks[0]["exact_original_comments"] == ["Exakter Kommentar 1"]
+    assert blocks[0]["linked_comment_ids"] == ["C1"]
+    assert blocks[0]["original_comment_count"] == 1
+    assert blocks[1]["exact_original_comments"] == []
+    docx = rebuilt / "AISurgeon_LIMITED_TEST_OUTPUT_NET_subset_comments_arial_fixed.docx"
+    assert docx.is_file()
+    with zipfile.ZipFile(docx) as archive:
+        xml = archive.read("word/document.xml").decode("utf-8")
+        assert "LIMITED TEST OUTPUT" in xml
+        assert "Exakter Kommentar 1" in xml
+        assert NO_ORIGINAL_COMMENT_TEXT in xml
+        assert xml.count("Alter Kommentar") == 2
+        assert "Calibri" not in xml
+        assert "Calibri" not in archive.read("word/styles.xml").decode("utf-8")
+        assert "Calibri" not in archive.read("word/fontTable.xml").decode("utf-8")
+    manifest = json.loads((rebuilt / "synthesis_manifest.json").read_text())
+    assert manifest["status"] == "technical_limited"
+    assert manifest["run_mode"] == "technical_limited"
+    assert manifest["reuse_synthesis_run"] == str(first.resolve())
 
 
 def test_limited_run_has_no_final_docx(tmp_path: Path) -> None:
