@@ -46,6 +46,11 @@ PUBLIC_FORBIDDEN_TERMS = (
     "NEW-PMID-",
     "LG-NEW-",
 )
+REFERENCE_FINALIZER_VERSION = "final_reference_resolution_v1"
+NO_ORIGINAL_REFERENCE_TEXT = (
+    "Originalreferenz im kanonischen Literaturverzeichnis nicht aufgelöst; "
+    "Quellzitatnummer erhalten, menschliche Referenzprüfung erforderlich."
+)
 
 
 class StrictModel(BaseModel):
@@ -132,6 +137,98 @@ def _source_id_from_records(records: list[dict[str, Any]]) -> str:
     if len(ids) != 1 or "None" in ids:
         raise ValueError("source_id mismatch in synthesis inputs")
     return ids.pop()
+
+
+def _transcription_run_from_manifest(extraction_manifest: dict[str, Any]) -> Path | None:
+    value = extraction_manifest.get("input_transcription_run")
+    if not value:
+        return None
+    path = Path(str(value)).resolve()
+    return path if path.is_dir() else None
+
+
+def parse_original_references_from_transcript(
+    transcription_run: Path | None, source_id: str
+) -> list[dict[str, Any]]:
+    if transcription_run is None:
+        return []
+    transcript = transcription_run / "canonical_transcript.md"
+    if not transcript.is_file():
+        return []
+    ignored_exact = {
+        "Leitlinie",
+        "Thieme",
+        (
+            "Dieses Dokument wurde zum persönlichen Gebrauch heruntergeladen. "
+            "Vervielfältigung nur mit Zustimmung des Verlages."
+        ),
+    }
+    records: list[dict[str, Any]] = []
+    current_number: str | None = None
+    current_lines: list[str] = []
+    bibliography_started = False
+
+    def flush() -> None:
+        nonlocal current_number, current_lines
+        if current_number is None:
+            return
+        text = " ".join(line.strip() for line in current_lines if line.strip())
+        text = re.sub(r"\s+", " ", text).strip()
+        if text:
+            records.append(
+                {
+                    "schema_version": "transcript_bibliography_parser_v1",
+                    "source_id": source_id,
+                    "reference_id": f"{source_id}_REF_{current_number}",
+                    "original_reference_number": current_number,
+                    "exact_original_reference_text": text,
+                    "source": "canonical_transcript_bibliography_parser",
+                }
+            )
+        current_number = None
+        current_lines = []
+
+    for raw_line in transcript.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("## Page"):
+            continue
+        if re.fullmatch(r"(literatur|literaturverzeichnis|references|bibliography)", line, re.I):
+            bibliography_started = True
+            flush()
+            continue
+        if not bibliography_started:
+            continue
+        if line in ignored_exact or re.fullmatch(r"\d{2,4}", line):
+            continue
+        if "S2k-Leitlinie Neuroendokrine Tumore" in line:
+            continue
+        match = re.match(r"^\[(\d{1,4})\]\s*(.+)$", line)
+        if match:
+            flush()
+            current_number = match.group(1)
+            current_lines = [f"[{current_number}] {match.group(2).strip()}"]
+            continue
+        if current_number is not None:
+            current_lines.append(line)
+    flush()
+    return records
+
+
+def merge_original_references_with_transcript(
+    references: list[dict[str, Any]], transcript_references: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    by_number = {str(ref.get("original_reference_number")): dict(ref) for ref in references}
+    for ref in transcript_references:
+        number = str(ref.get("original_reference_number"))
+        if number and number not in by_number:
+            by_number[number] = dict(ref)
+    return [
+        by_number[number]
+        for number in sorted(
+            by_number,
+            key=lambda value: int(value) if str(value).isdigit() else 10**9,
+        )
+    ]
 
 
 def _readable_source_label(source_id: str) -> str:
@@ -598,6 +695,8 @@ def consolidate_references(
             return key_to_number[key]
         if entry.get("source") == "new_pubmed":
             number: str | int = f"N{sum(x.get('source') == 'new_pubmed' for x in entries) + 1}"
+        elif str(entry.get("original_reference_number") or "").isdigit():
+            number = int(str(entry["original_reference_number"]))
         else:
             number = len(entries) + 1
         key_to_number[key] = number
@@ -627,14 +726,29 @@ def consolidate_references(
         for old_id in block["old_reference_ids"]:
             old_id = str(old_id)
             if old_id not in old_by_number:
+                old_number_map[old_id] = add_entry(
+                    ("old-unresolved", old_id),
+                    {
+                        "source": "original_unresolved",
+                        "internal_reference_id": f"OLD-UNRESOLVED-{old_id}",
+                        "original_reference_number": old_id,
+                        "pmid": None,
+                        "doi": None,
+                        "normalized_title": None,
+                        "full_citation": f"[{old_id}] {NO_ORIGINAL_REFERENCE_TEXT}",
+                        "used_in_formal_item_ids": [block["formal_item_id"]],
+                        "first_seen_in_formal_item_id": block["formal_item_id"],
+                    },
+                )
                 findings.append(
                     {
                         "finding_id": f"REF_UNRESOLVED_{block['formal_item_id']}_{old_id}",
-                        "source_id": block["source_id"],
-                        "formal_item_id": block["formal_item_id"],
+                        "source_id": block.get("source_id"),
+                        "formal_item_id": block.get("formal_item_id"),
                         "issue_code": "unresolved_original_reference",
                         "message": (
-                            f"Originaler Literaturverweis {old_id} konnte nicht aufgelöst werden."
+                            f"Originaler Literaturverweis {old_id} konnte nicht aufgelöst werden; "
+                            "Platzhaltereintrag im finalen Literaturverzeichnis erzeugt."
                         ),
                     }
                 )
@@ -649,8 +763,8 @@ def consolidate_references(
                 findings.append(
                     {
                         "finding_id": f"REF_UNKNOWN_PMID_{block['formal_item_id']}_{pmid}",
-                        "source_id": block["source_id"],
-                        "formal_item_id": block["formal_item_id"],
+                        "source_id": block.get("source_id"),
+                        "formal_item_id": block.get("formal_item_id"),
                         "issue_code": "used_pmid_missing_from_fetch",
                         "message": f"Verwendete PMID {pmid} fehlt im Fetch-Run.",
                     }
@@ -712,34 +826,109 @@ def consolidate_references(
             ]
             if str(pmid) in new_number_map
         ]
+        block["final_new_reference_citation"] = _citation(list(block["new_reference_ids"]))
     return entries, number_map, findings
+
+
+def _n_sort_key(value: str) -> tuple[int, str]:
+    match = re.fullmatch(r"N(\d+)", value)
+    return (int(match.group(1)), "") if match else (10**9, value)
+
+
+def _format_n_citation(values: list[str]) -> str:
+    numbers = sorted(
+        {int(match.group(1)) for value in values if (match := re.fullmatch(r"N(\d+)", value))}
+    )
+    if not numbers:
+        return "[]"
+    ranges: list[str] = []
+    start = prev = numbers[0]
+    for value in numbers[1:]:
+        if value == prev + 1:
+            prev = value
+            continue
+        ranges.append(f"N{start}-N{prev}" if start != prev else f"N{start}")
+        start = prev = value
+    ranges.append(f"N{start}-N{prev}" if start != prev else f"N{start}")
+    return "[" + ", ".join(ranges) + "]"
+
+
+def _expand_n_tokens(text: str) -> set[str]:
+    tokens: set[str] = set()
+    for match in re.finditer(r"N(\d+)(?:\s*[-]\s*N?(\d+))?", text):
+        start = int(match.group(1))
+        end = int(match.group(2) or start)
+        tokens.update(f"N{number}" for number in range(start, end + 1))
+    return tokens
 
 
 def replace_raw_pmids_in_update_text(
     blocks: list[dict[str, Any]], number_map: dict[str, Any]
-) -> None:
+) -> list[dict[str, Any]]:
     pmid_map = {str(k): str(v) for k, v in number_map.get("new_pubmed_pmids", {}).items()}
+    occurrences: list[dict[str, Any]] = []
 
-    def replace(text: str) -> str:
+    def replace(text: str, *, block: dict[str, Any], field: str) -> str:
+        before = text
+
         def repl(match: re.Match[str]) -> str:
             pmid = match.group(1)
             if pmid in pmid_map:
+                occurrences.append(
+                    {
+                        "source_id": block.get("source_id"),
+                        "formal_item_id": block.get("formal_item_id"),
+                        "field": field,
+                        "raw_pmid": pmid,
+                        "resolved_reference_number": pmid_map[pmid],
+                        "resolution": "raw_pmid_to_new_reference",
+                    }
+                )
                 return f"[{pmid_map[pmid]}]"
             return "[PubMed-Referenz nicht zugeordnet]"
 
-        return re.sub(r"\bPMID:?\s*(\d{5,})\b", repl, text)
+        text = re.sub(r"\bPMIDs?:?\s*(\d{5,})\b", repl, text)
+        pmid_pattern = r"(?<![A-Za-z])\b(" + "|".join(sorted(map(re.escape, pmid_map))) + r")\b"
+        if pmid_map:
+            text = re.sub(pmid_pattern, repl, text)
+        text = re.sub(r"\bPMIDs?:?\s*(?=\[N\d+\])", "", text)
+        previous = None
+        while previous != text:
+            previous = text
+            text = re.sub(
+                r"\[([^\]]*N\d+[^\]]*)\]\s*,\s*\[(N\d+)\]",
+                lambda match: _format_n_citation(
+                    re.findall(r"N\d+", f"{match.group(1)} {match.group(2)}")
+                ),
+                text,
+            )
+        text = re.sub(r"\(\s*(\[[^\]]*N\d+[^\]]*\])\s*\)", r"\1", text)
+        if before != text and before.count("[N") != text.count("[N"):
+            occurrences.append(
+                {
+                    "source_id": block.get("source_id"),
+                    "formal_item_id": block.get("formal_item_id"),
+                    "field": field,
+                    "raw_pmid": None,
+                    "resolved_reference_number": None,
+                    "resolution": "citation_group_normalized",
+                }
+            )
+        return text
 
     for block in blocks:
         for field in ("updated_item_text_de", "new_evidence_de", "conclusion_de"):
-            block[field] = replace(str(block.get(field) or ""))
+            block[field] = replace(str(block.get(field) or ""), block=block, field=field)
+        block["review_notes"] = [
+            replace(str(note), block=block, field="review_notes")
+            for note in block.get("review_notes", [])
+        ]
+    return occurrences
 
 
 def _citation(numbers: list[Any]) -> str:
     numeric_values = sorted({int(value) for value in numbers if isinstance(value, int)})
-    string_values = sorted(
-        {str(value) for value in numbers if not isinstance(value, int)},
-        key=lambda value: (not value.startswith("N"), value),
-    )
+    string_values = sorted({str(value) for value in numbers if not isinstance(value, int)})
     if not numeric_values and not string_values:
         return ""
     ranges: list[str] = []
@@ -755,8 +944,257 @@ def _citation(numbers: list[Any]) -> str:
         start = prev = value
     if start is not None and prev is not None:
         ranges.append(f"{start}-{prev}" if start != prev else str(start))
-    ranges.extend(string_values)
+    n_values = [value for value in string_values if re.fullmatch(r"N\d+", value)]
+    other_values = [value for value in string_values if value not in n_values]
+    if n_values:
+        ranges.append(_format_n_citation(n_values).strip("[]"))
+    ranges.extend(other_values)
     return "[" + ", ".join(ranges) + "]"
+
+
+def _reference_sort_key(entry: dict[str, Any]) -> tuple[int, int, str]:
+    number = str(entry.get("final_reference_number") or "")
+    if number.startswith("N") and number[1:].isdigit():
+        return (1, int(number[1:]), number)
+    if number.isdigit():
+        return (0, int(number), number)
+    return (2, 10**9, number)
+
+
+def _extract_citation_occurrences(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    occurrences: list[dict[str, Any]] = []
+    fields = (
+        "exact_original_item_text",
+        "updated_item_text_de",
+        "exact_original_comments",
+        "new_evidence_de",
+        "conclusion_de",
+        "final_new_reference_citation",
+    )
+    for block in blocks:
+        for field in fields:
+            values = block.get(field)
+            texts = values if isinstance(values, list) else [values]
+            for index, value in enumerate(texts):
+                text = str(value or "")
+                for match in re.finditer(r"\[([^\]]+)\]", text):
+                    content = match.group(1)
+                    tokens = [
+                        *sorted(_expand_n_tokens(content), key=_n_sort_key),
+                        *re.findall(r"(?<!N)\b\d+(?:\s*[-]\s*\d+)?", content),
+                    ]
+                    for token in tokens:
+                        if token.startswith("N"):
+                            occurrences.append(
+                                {
+                                    "source_id": block["source_id"],
+                                    "formal_item_id": block["formal_item_id"],
+                                    "field": field,
+                                    "field_index": index,
+                                    "citation_token": token,
+                                    "citation_namespace": "new_pubmed",
+                                }
+                            )
+                            continue
+                        if re.search(r"[-]", token):
+                            start, end = [
+                                int(part.strip()) for part in re.split(r"[-]", token, maxsplit=1)
+                            ]
+                            for number in range(start, end + 1):
+                                occurrences.append(
+                                    {
+                                        "source_id": block["source_id"],
+                                        "formal_item_id": block["formal_item_id"],
+                                        "field": field,
+                                        "field_index": index,
+                                        "citation_token": str(number),
+                                        "citation_namespace": "original",
+                                    }
+                                )
+                        elif token.isdigit():
+                            occurrences.append(
+                                {
+                                    "source_id": block["source_id"],
+                                    "formal_item_id": block["formal_item_id"],
+                                    "field": field,
+                                    "field_index": index,
+                                    "citation_token": token,
+                                    "citation_namespace": "original",
+                                }
+                            )
+    return occurrences
+
+
+def _raw_narrative_pmids(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    for block in blocks:
+        for field in ("updated_item_text_de", "new_evidence_de", "conclusion_de", "review_notes"):
+            values = block.get(field)
+            texts = values if isinstance(values, list) else [values]
+            for index, value in enumerate(texts):
+                for match in re.finditer(r"(?<!N)(?<![A-Za-z])\b\d{7,9}\b", str(value or "")):
+                    findings.append(
+                        {
+                            "source_id": block["source_id"],
+                            "formal_item_id": block["formal_item_id"],
+                            "field": field,
+                            "field_index": index,
+                            "raw_token": match.group(0),
+                            "issue_code": "raw_narrative_pmid",
+                        }
+                    )
+    return findings
+
+
+def finalize_references(
+    *,
+    blocks: list[dict[str, Any]],
+    refs: list[dict[str, Any]],
+    number_map: dict[str, Any],
+    reference_findings: list[dict[str, Any]],
+    source_id: str,
+) -> tuple[list[dict[str, Any]], dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+    occurrences = replace_raw_pmids_in_update_text(blocks, number_map)
+    citation_occurrences = _extract_citation_occurrences(blocks)
+    raw_findings = _raw_narrative_pmids(blocks)
+    cited_old = {
+        str(item["citation_token"])
+        for item in citation_occurrences
+        if item["citation_namespace"] == "original"
+    }
+    cited_new = {
+        str(item["citation_token"])
+        for item in citation_occurrences
+        if item["citation_namespace"] == "new_pubmed"
+    }
+    ref_by_number = {str(ref["final_reference_number"]): ref for ref in refs}
+    missing_old = sorted(
+        cited_old - set(ref_by_number),
+        key=lambda value: int(value) if value.isdigit() else 10**9,
+    )
+    def add_unresolved_original(old_id: str, *, cited: bool) -> None:
+        if str(old_id) in {str(ref["final_reference_number"]) for ref in refs}:
+            return
+        refs.append(
+            {
+                "final_reference_number": int(old_id) if old_id.isdigit() else old_id,
+                "source": "original_unresolved",
+                "internal_reference_id": f"OLD-UNRESOLVED-{old_id}",
+                "original_reference_number": old_id,
+                "pmid": None,
+                "doi": None,
+                "normalized_title": None,
+                "full_citation": f"[{old_id}] {NO_ORIGINAL_REFERENCE_TEXT}",
+                "used_in_formal_item_ids": [
+                    item["formal_item_id"]
+                    for item in citation_occurrences
+                    if item["citation_token"] == old_id
+                ],
+                "first_seen_in_formal_item_id": next(
+                    (
+                        item["formal_item_id"]
+                        for item in citation_occurrences
+                        if item["citation_token"] == old_id
+                    ),
+                    None,
+                ),
+            }
+        )
+        number_map.setdefault("old_reference_numbers", {})[old_id] = (
+            int(old_id) if old_id.isdigit() else old_id
+        )
+        issue_code = (
+            "unresolved_original_reference_placeholder"
+            if cited
+            else "unresolved_original_reference_sequence_gap"
+        )
+        reference_findings.append(
+            {
+                "finding_id": f"FINAL_REF_UNRESOLVED_ORIGINAL_{old_id}",
+                "source_id": source_id,
+                "formal_item_id": None,
+                "issue_code": issue_code,
+                "message": (
+                    f"Original reference [{old_id}] is absent from the parsed bibliography; "
+                    "placeholder entry retained for reference-integrity review."
+                ),
+            }
+        )
+
+    for old_id in missing_old:
+        add_unresolved_original(old_id, cited=True)
+
+    ref_by_number = {str(ref["final_reference_number"]): ref for ref in refs}
+    original_numbers = sorted(
+        {
+            int(number)
+            for number in ref_by_number
+            if number.isdigit()
+            and str(ref_by_number[number].get("source", "")).startswith("original")
+        }
+    )
+    if original_numbers:
+        for number in range(original_numbers[0], original_numbers[-1] + 1):
+            if str(number) not in ref_by_number:
+                add_unresolved_original(str(number), cited=False)
+        ref_by_number = {str(ref["final_reference_number"]): ref for ref in refs}
+
+    missing_new = sorted(cited_new - set(ref_by_number), key=_n_sort_key)
+    unreferenced_new = sorted(
+        {
+            str(ref["final_reference_number"])
+            for ref in refs
+            if str(ref.get("source")) == "new_pubmed"
+        }
+        - cited_new,
+        key=_n_sort_key,
+    )
+    for finding in raw_findings:
+        reference_findings.append(
+            {
+                "finding_id": (
+                    f"FINAL_REF_RAW_PMID_{finding['formal_item_id']}_"
+                    f"{finding['field']}_{finding['raw_token']}"
+                ),
+                **finding,
+                "message": "Raw PubMed ID remained in generated narrative text.",
+            }
+        )
+    for token in missing_new:
+        reference_findings.append(
+            {
+                "finding_id": f"FINAL_REF_MISSING_NEW_{token}",
+                "source_id": source_id,
+                "formal_item_id": None,
+                "issue_code": "missing_new_reference",
+                "message": f"New citation [{token}] has no final new reference entry.",
+            }
+        )
+    report = {
+        "schema_version": REFERENCE_FINALIZER_VERSION,
+        "source_id": source_id,
+        "raw_narrative_pmid_count": len(raw_findings),
+        "raw_pmid_replacements": len([x for x in occurrences if x.get("raw_pmid")]),
+        "citation_group_normalizations": len(
+            [x for x in occurrences if x.get("resolution") == "citation_group_normalized"]
+        ),
+        "cited_original_reference_count": len(cited_old),
+        "cited_new_reference_count": len(cited_new),
+        "missing_original_reference_count_after_placeholder": 0,
+        "missing_new_reference_count": len(missing_new),
+        "unreferenced_new_reference_count": len(unreferenced_new),
+        "unreferenced_new_references": unreferenced_new,
+        "original_reference_placeholder_count": sum(
+            ref.get("source") == "original_unresolved" for ref in refs
+        ),
+        "reference_count": len(refs),
+        "original_reference_count": sum(
+            str(ref.get("source")).startswith("original") for ref in refs
+        ),
+        "new_reference_count": sum(ref.get("source") == "new_pubmed" for ref in refs),
+    }
+    refs.sort(key=_reference_sort_key)
+    return refs, report, citation_occurrences + occurrences, reference_findings
 
 
 def _old_section_label(block: dict[str, Any]) -> str:
@@ -803,13 +1241,7 @@ def _block_comments(block: dict[str, Any]) -> list[str]:
 def render_blocks_markdown(blocks: list[dict[str, Any]], number_map: dict[str, Any]) -> str:
     lines = ["# Aktualisierte Leitlinienblöcke", ""]
     for block in blocks:
-        citation_numbers = [
-            number_map["old_reference_numbers"].get(str(x))
-            for x in block["old_reference_ids"]
-            if number_map["old_reference_numbers"].get(str(x)) is not None
-        ]
-        citation_numbers += list(block["new_reference_ids"])
-        citation = _citation(citation_numbers)
+        citation = str(block.get("final_new_reference_citation") or "")
         lines.extend(
             [
                 f"## {block['original_item_number']} - {block['source_native_item_type']}",
@@ -820,7 +1252,7 @@ def render_blocks_markdown(blocks: list[dict[str, Any]], number_map: dict[str, A
                 "",
                 f"**{_new_section_label(block)}**",
                 "",
-                block["updated_item_text_de"] + (f" {citation}" if citation else ""),
+                block["updated_item_text_de"],
                 "",
                 "**Alter Kommentar**",
                 "",
@@ -952,7 +1384,10 @@ def _docx_xml(
         for comment in _block_comments(block):
             body.append(_w_p(comment, jc="both"))
         body.append(_w_p("Neue Evidenz", style="Heading3"))
-        body.append(_w_p(block["new_evidence_de"], jc="both"))
+        evidence_text = block["new_evidence_de"]
+        if block.get("final_new_reference_citation"):
+            evidence_text = f"{evidence_text} {block['final_new_reference_citation']}"
+        body.append(_w_p(evidence_text, jc="both"))
         body.append(_w_p("Schlussfolgerung", style="Heading3"))
         body.append(_w_p(block["conclusion_de"], jc="both"))
         body.append(
@@ -1182,6 +1617,54 @@ def run_docx_qa(docx_path: Path, run_dir: Path) -> dict[str, Any]:
                 report["critical_layout_errors"].append(f"Calibri present in {part}")
         if any(term in document_xml for term in PUBLIC_FORBIDDEN_TERMS):
             report["critical_layout_errors"].append("Forbidden public-term marker present")
+        text = re.sub(r"<[^>]+>", " ", document_xml)
+        text = re.sub(r"\s+", " ", text)
+        narrative = text.split("Konsolidiertes Literaturverzeichnis")[0]
+        raw_pmids = re.findall(r"(?<!N)(?<![A-Za-z])\b\d{7,9}\b", narrative)
+        if raw_pmids:
+            report["critical_layout_errors"].append(
+                f"Raw narrative PubMed IDs present: {sorted(set(raw_pmids))[:20]}"
+            )
+        citation_groups = re.findall(r"\[([^\]]+)\]", narrative)
+        for group in citation_groups:
+            has_new = bool(re.search(r"\bN\d+\b", group))
+            without_new = re.sub(r"\bN\d+\b", "", group)
+            has_old = bool(re.search(r"\b\d+\b", without_new))
+            if has_new and has_old:
+                report["critical_layout_errors"].append(f"Mixed old/new citation group: [{group}]")
+        bibliography = text.split("Konsolidiertes Literaturverzeichnis")[-1]
+        cited_new: set[str] = set()
+        for group in citation_groups:
+            cited_new.update(_expand_n_tokens(group))
+        bibliography_new = set(re.findall(r"\bN\d+\.", bibliography))
+        bibliography_new = {value.rstrip(".") for value in bibliography_new}
+        missing_new = sorted(cited_new - bibliography_new, key=_n_sort_key)
+        uncited_new = sorted(bibliography_new - cited_new, key=_n_sort_key)
+        if missing_new:
+            report["critical_layout_errors"].append(f"Missing N references: {missing_new[:20]}")
+        if uncited_new:
+            report["critical_layout_errors"].append(f"Uncited N references: {uncited_new[:20]}")
+        cited_old: set[str] = set()
+        for group in citation_groups:
+            if "N" in group:
+                continue
+            for token in re.findall(r"\d+(?:\s*[-]\s*\d+)?", group):
+                if re.search(r"[-]", token):
+                    start, end = [
+                        int(part.strip()) for part in re.split(r"[-]", token, maxsplit=1)
+                    ]
+                    cited_old.update(str(number) for number in range(start, end + 1))
+                else:
+                    cited_old.add(token)
+        bibliography_old = set(re.findall(r"(?:^|\s)(\d{1,4})\.", bibliography))
+        missing_old = sorted(
+            cited_old - bibliography_old,
+            key=lambda value: int(value) if value.isdigit() else 10**9,
+        )
+        if missing_old:
+            report["critical_layout_errors"].append(
+                f"Missing original references: {missing_old[:20]}"
+            )
         report["structural_valid"] = not report["critical_layout_errors"]
     soffice = shutil.which("soffice") or shutil.which("libreoffice")
     if not soffice:
@@ -1277,6 +1760,12 @@ def build_updated_guideline(
     source_id = _source_id_from_records(formal)
     if any(str(m.get("source_id")) != source_id for m in manifests):
         raise ValueError("source_id mismatch between synthesis inputs")
+    references = merge_original_references_with_transcript(
+        references,
+        parse_original_references_from_transcript(
+            _transcription_run_from_manifest(manifests[0]), source_id
+        ),
+    )
     config = json.loads(MODEL_CONFIG_PATH.read_text(encoding="utf-8"))
     prompt = PROMPT_PATH.read_text(encoding="utf-8")
     fingerprint = {
@@ -1381,7 +1870,13 @@ def build_updated_guideline(
     refs, number_map, reference_findings = consolidate_references(
         old_references=references, articles=articles, blocks=blocks
     )
-    replace_raw_pmids_in_update_text(blocks, number_map)
+    refs, resolution_report, citation_occurrences, reference_findings = finalize_references(
+        blocks=blocks,
+        refs=refs,
+        number_map=number_map,
+        reference_findings=reference_findings,
+        source_id=source_id,
+    )
     markdown = render_blocks_markdown(blocks, number_map)
     synthesis_findings = [
         {
@@ -1418,11 +1913,36 @@ def build_updated_guideline(
     write_jsonl(run_dir / "updated_guideline_blocks.jsonl", blocks)
     (run_dir / "updated_guideline_blocks.md").write_text(markdown + "\n", encoding="utf-8")
     write_jsonl(run_dir / "consolidated_references.jsonl", refs)
+    write_json(
+        run_dir / "final_reference_registry.json",
+        {
+            "schema_version": REFERENCE_FINALIZER_VERSION,
+            "source_id": source_id,
+            "references": refs,
+            "number_map": number_map,
+        },
+    )
+    write_jsonl(
+        run_dir / "final_original_references.jsonl",
+        [ref for ref in refs if str(ref.get("source")).startswith("original")],
+    )
+    write_jsonl(
+        run_dir / "final_new_references.jsonl",
+        [ref for ref in refs if ref.get("source") == "new_pubmed"],
+    )
+    write_jsonl(run_dir / "final_citation_occurrences.jsonl", citation_occurrences)
+    write_json(run_dir / "final_citation_resolution_report.json", resolution_report)
     write_json(run_dir / "reference_number_map.json", number_map)
     write_jsonl(run_dir / "synthesis_review_findings.jsonl", synthesis_findings)
     _write_xlsx(run_dir / "synthesis_review_findings.xlsx", "synthesis_review", synthesis_findings)
     write_jsonl(run_dir / "reference_review_findings.jsonl", reference_findings)
     _write_xlsx(run_dir / "reference_review_findings.xlsx", "reference_review", reference_findings)
+    write_jsonl(run_dir / "final_citation_resolution_findings.jsonl", reference_findings)
+    _write_xlsx(
+        run_dir / "final_citation_resolution_findings.xlsx",
+        "citation_resolution",
+        reference_findings,
+    )
     docx_name = (
         "AISurgeon_LIMITED_TEST_OUTPUT_NET_subset_comments_arial_fixed.docx"
         if technical_limited_document

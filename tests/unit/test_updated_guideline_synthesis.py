@@ -9,11 +9,16 @@ from pydantic import SecretStr
 from aisurgeon.synthesis.updated_guideline import (
     NO_ORIGINAL_COMMENT_TEXT,
     PUBLIC_FORBIDDEN_TERMS,
+    _citation,
     build_item_evidence_packets,
     build_updated_guideline,
     consolidate_references,
+    finalize_references,
+    parse_original_references_from_transcript,
     replace_raw_pmids_in_update_text,
+    run_docx_qa,
     validate_synthesis,
+    write_docx,
 )
 
 
@@ -43,6 +48,34 @@ def test_raw_pmids_are_replaced_in_generated_update_text_only() -> None:
         "Neue Evidenz [N2] und [PubMed-Referenz nicht zugeordnet]."
     )
     assert blocks[0]["conclusion_de"] == "Schluss aus [N1]."
+
+
+def test_mixed_n_and_raw_pmid_group_becomes_pure_n_citation() -> None:
+    blocks = [
+        {
+            "source_id": "SRC",
+            "formal_item_id": "F1",
+            "updated_item_text_de": "Unverändert.",
+            "new_evidence_de": "weiter zu klären ist ([N247], 30733049, 40096872)",
+            "conclusion_de": "Keine Änderung.",
+            "review_notes": [],
+        }
+    ]
+
+    occurrences = replace_raw_pmids_in_update_text(
+        blocks, {"new_pubmed_pmids": {"30733049": "N248", "40096872": "N249"}}
+    )
+
+    assert blocks[0]["new_evidence_de"] == "weiter zu klären ist [N247-N249]"
+    assert {item["raw_pmid"] for item in occurrences if item["raw_pmid"]} == {
+        "30733049",
+        "40096872",
+    }
+
+
+def test_citation_compacts_n_ranges_and_keeps_old_separate() -> None:
+    assert _citation(["N1", "N3", "N4", "N5", "N9"]) == "[N1, N3-N5, N9]"
+    assert _citation([12, 13]) == "[12-13]"
 
 
 def _json(path: Path, value: dict) -> None:
@@ -414,6 +447,97 @@ def test_references_are_consolidated_by_first_appearance_and_deduplicated() -> N
     assert findings == []
 
 
+def test_final_reference_resolver_keeps_original_sequence_gaps_auditable() -> None:
+    blocks = [
+        {
+            "source_id": "SRC",
+            "formal_item_id": "F1",
+            "exact_original_item_text": "Original [1]",
+            "updated_item_text_de": "Unverändert.",
+            "exact_original_comments": [],
+            "new_evidence_de": "Keine neue Evidenz.",
+            "conclusion_de": "Keine Änderung.",
+            "review_notes": [],
+            "final_new_reference_citation": "",
+        }
+    ]
+    refs = [
+        {
+            "final_reference_number": 1,
+            "source": "original",
+            "original_reference_number": "1",
+            "full_citation": "Old 1",
+        },
+        {
+            "final_reference_number": 3,
+            "source": "original",
+            "original_reference_number": "3",
+            "full_citation": "Old 3",
+        },
+    ]
+
+    resolved, report, _occurrences, findings = finalize_references(
+        blocks=blocks,
+        refs=refs,
+        number_map={"old_reference_numbers": {"1": 1, "3": 3}, "new_pubmed_pmids": {}},
+        reference_findings=[],
+        source_id="SRC",
+    )
+
+    assert [ref["final_reference_number"] for ref in resolved] == [1, 2, 3]
+    gap = next(ref for ref in resolved if ref["final_reference_number"] == 2)
+    assert gap["source"] == "original_unresolved"
+    assert report["original_reference_placeholder_count"] == 1
+    assert findings[0]["issue_code"] == "unresolved_original_reference_sequence_gap"
+
+
+def test_transcript_bibliography_parser_recovers_wrapped_references(tmp_path: Path) -> None:
+    run = tmp_path / "transcription"
+    run.mkdir()
+    (run / "canonical_transcript.md").write_text(
+        "\n".join(
+            [
+                "Vortext mit Inline-Zitat [159].",
+                "Literatur",
+                "[10] Alpha A et al. First title.",
+                "Journal 2020; 1: 1-2",
+                "## Page 94",
+                "[11] Beta B et al. Wrapped",
+                "reference title. Journal 2021; 2: 3-4",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    refs = parse_original_references_from_transcript(run, "SRC")
+
+    assert [ref["original_reference_number"] for ref in refs] == ["10", "11"]
+    assert "Wrapped reference title" in refs[1]["exact_original_reference_text"]
+
+
+def test_transcript_bibliography_parser_ignores_inline_citations_before_heading(
+    tmp_path: Path,
+) -> None:
+    run = tmp_path / "transcription"
+    run.mkdir()
+    (run / "canonical_transcript.md").write_text(
+        "\n".join(
+            [
+                "Diagnostischer Fließtext endet mit einem Inline-Zitat.",
+                "[159].",
+                "Danach folgt weiterer klinischer Fließtext.",
+                "Literatur",
+                "[160] Real R et al. Real bibliography entry. Journal 2020; 1: 1-2",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    refs = parse_original_references_from_transcript(run, "SRC")
+
+    assert [ref["original_reference_number"] for ref in refs] == ["160"]
+
+
 def test_docx_structure_unmodified_not_duplicated_modified_separated_and_resume(
     tmp_path: Path,
 ) -> None:
@@ -508,6 +632,91 @@ def test_docx_structure_unmodified_not_duplicated_modified_separated_and_resume(
     qa = json.loads((run / "docx_qa_report.json").read_text())
     assert qa["structural_valid"] is True
     assert not qa["critical_layout_errors"]
+
+
+def test_docx_qa_catches_raw_narrative_pmid(tmp_path: Path) -> None:
+    block = {
+        "source_id": "SRC",
+        "formal_item_id": "F1",
+        "original_item_number": "1",
+        "source_native_item_type": "Empfehlung",
+        "section_path": [],
+        "decision": "unchanged",
+        "exact_original_item_text": "Original.",
+        "updated_item_text_de": "Fortbestehend.",
+        "exact_original_comments": [],
+        "new_evidence_de": "Neue Evidenz mit 30733049.",
+        "conclusion_de": "Keine Änderung.",
+        "review_required": False,
+        "review_notes": [],
+        "original_grade": None,
+        "original_level_of_evidence": None,
+        "original_consensus": None,
+        "original_status": None,
+    }
+    docx = tmp_path / "raw-pmid.docx"
+
+    write_docx(
+        docx,
+        [block],
+        [{"final_reference_number": "N1", "full_citation": "New reference. PMID: 30733049."}],
+        {
+            "source_id": "SRC",
+            "document_title": "AISurgeon Aktualisierte Leitlinie SRC",
+            "formal_items": 1,
+            "modified": 0,
+            "rationale_updated": 0,
+            "unchanged": 1,
+            "insufficient_new_evidence": 0,
+        },
+    )
+
+    qa = run_docx_qa(docx, tmp_path)
+
+    assert qa["structural_valid"] is False
+    assert any("Raw narrative PubMed IDs" in err for err in qa["critical_layout_errors"])
+
+
+def test_docx_qa_does_not_treat_clinical_n0_as_new_reference(tmp_path: Path) -> None:
+    block = {
+        "source_id": "SRC",
+        "formal_item_id": "F1",
+        "original_item_number": "1",
+        "source_native_item_type": "Empfehlung",
+        "section_path": [],
+        "decision": "unchanged",
+        "exact_original_item_text": "Original.",
+        "updated_item_text_de": "Fortbestehend.",
+        "exact_original_comments": [],
+        "new_evidence_de": "N0 nach Lymphadenektomie bleibt klinischer Status. [N1]",
+        "conclusion_de": "Keine Änderung.",
+        "review_required": False,
+        "review_notes": [],
+        "original_grade": None,
+        "original_level_of_evidence": None,
+        "original_consensus": None,
+        "original_status": None,
+    }
+    docx = tmp_path / "n0.docx"
+
+    write_docx(
+        docx,
+        [block],
+        [{"final_reference_number": "N1", "full_citation": "New reference. PMID: 30733049."}],
+        {
+            "source_id": "SRC",
+            "document_title": "AISurgeon Aktualisierte Leitlinie SRC",
+            "formal_items": 1,
+            "modified": 0,
+            "rationale_updated": 0,
+            "unchanged": 1,
+            "insufficient_new_evidence": 0,
+        },
+    )
+
+    qa = run_docx_qa(docx, tmp_path)
+
+    assert not any("N0" in err for err in qa["critical_layout_errors"])
 
 
 def test_limited_docx_renders_comments_no_comment_message_and_reuses_synthesis(
