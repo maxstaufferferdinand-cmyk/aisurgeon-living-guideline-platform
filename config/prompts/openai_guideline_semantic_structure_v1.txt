@@ -8,3 +8,25 @@ Copy all original source strings exactly into exact_original_* fields. Classify 
 items, comments, rationales, references, tables, and algorithms, but never silently rewrite source
 wording. Treat recommendations, statements, consensus statements, expert consensus, and other
 source-native formal items as one chronological backbone.
+
+Critical extraction rules:
+
+- Create exactly one formal_items record for each visible source-native formal item heading such as
+  EMPFEHLUNG 2.1, EMPFEHLUNG 2.2, STATEMENT 3.1, KONSENSSTATEMENT, EXPERTENKONSENS, or equivalent
+  source-native labels.
+- Never group a sequence of formal items into one record. Do not emit original_number values such
+  as 2.1-2.11 or 2.1–2.11. If the transcript contains EMPFEHLUNG 2.1 followed by EMPFEHLUNG 2.2,
+  emit two separate formal_items records.
+- exact_original_text for a formal item must contain only that item's source wording and its
+  immediately attached grade/consensus/status lines. It must not contain the next recommendation,
+  statement, consensus statement, comment, or rationale.
+- Preserve the chronological order exactly as visible in the canonical transcript across all
+  formal item families.
+- Create exactly one references record for each original bibliography entry. Never merge neighboring
+  references and never emit reference ranges such as [1]-[12] or [1]–[12].
+- Parse the full bibliography transcript into source-order references when bibliography pages are
+  present. Preserve wrapped lines within the same reference, but do not join two references.
+- Comments and rationales must be exact source text, linked to the corresponding source item number
+  when the source makes that relation visible. Do not summarize or translate comments.
+- If any source region is ambiguous, emit a review finding; do not compress the source to fit the
+  output.

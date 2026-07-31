@@ -6,7 +6,7 @@ import pytest
 from pydantic import SecretStr
 
 from aisurgeon.search.pubmed import ncbi
-from aisurgeon.search.pubmed.generation import generate_searches, normalize_search_plan
+from aisurgeon.search.pubmed.generation import generate_searches, load_jsonl, normalize_search_plan
 from aisurgeon.search.pubmed.models import SearchPlanDraft, SearchUnitDraft
 from aisurgeon.search.pubmed.ncbi import (
     ESearchQueryError,
@@ -18,6 +18,7 @@ from aisurgeon.search.pubmed.ncbi import (
 from aisurgeon.search.pubmed.query import (
     EVIDENCE_TYPE_FILTER,
     build_query,
+    sanitize_query_core,
     validate_final_pubmed_query,
     validate_query_core,
 )
@@ -147,6 +148,25 @@ def test_python_adds_technical_filters() -> None:
 @pytest.mark.parametrize("value", ["(GERD OR reflux", "()", "AND GERD", "GERD OR AND reflux"])
 def test_boolean_validation(value: str) -> None:
     assert validate_query_core(value)
+
+
+def test_query_core_allows_same_quoted_term_in_different_fields() -> None:
+    query = (
+        '"Helicobacter pylori"[Mesh] OR "Helicobacter pylori"[tiab] OR '
+        '"heart failure"[Mesh] OR "heart failure"[tiab]'
+    )
+    assert validate_query_core(query) == []
+
+
+def test_query_core_sanitizes_unquoted_pubmed_phrases() -> None:
+    query = (
+        "unknown primary[tiab] OR primary tumor not found[tiab] OR "
+        "Hedinger-Syndrom[tiab] OR carcinoid*[tiab]"
+    )
+    assert sanitize_query_core(query) == (
+        '"unknown primary"[tiab] OR "primary tumor not found"[tiab] OR '
+        '"Hedinger-Syndrom"[tiab] OR carcinoid*[tiab]'
+    )
 
 
 def test_esearch_paginates_retries_and_never_places_key_in_cache(tmp_path: Path) -> None:
@@ -678,6 +698,46 @@ def test_search_generation_is_mocked_resumable_and_covers_every_item(tmp_path: P
         )
 
 
+def test_search_generation_batches_large_formal_item_sets(tmp_path: Path) -> None:
+    extraction = tmp_path / "extraction"
+    extraction.mkdir()
+    formal = [
+        {**item(str(index), "recommendation"), "source_id": "SRC"}
+        for index in range(1, 31)
+    ]
+    (extraction / "formal_items.jsonl").write_text(
+        "\n".join(json.dumps(value) for value in formal) + "\n", encoding="utf-8"
+    )
+    (extraction / "comments.jsonl").write_text("", encoding="utf-8")
+    (extraction / "document_map.validated.json").write_text("{}", encoding="utf-8")
+    (extraction / "extraction_manifest.json").write_text(
+        json.dumps({"status": "completed_with_review", "source_id": "SRC"}), encoding="utf-8"
+    )
+    batch_sizes: list[int] = []
+
+    class FakeOpenAI:
+        def create(self, prompt, payload):
+            batch_sizes.append(len(payload["formal_items"]))
+            return SearchPlanDraft(
+                search_units=[
+                    draft([str(row["formal_item_id"]) for row in payload["formal_items"]])
+                ]
+            ).model_dump(mode="json")
+
+    run = generate_searches(
+        input_run=extraction,
+        output_root=tmp_path,
+        worker_id="worker",
+        api_key=SecretStr("dummy"),
+        start_date=date(2023, 1, 1),
+        end_date=date(2026, 7, 14),
+        client_factory=lambda api_key, config: FakeOpenAI(),
+    )
+    assert batch_sizes == [5, 5, 5, 5, 5, 5]
+    assert len(list(run.glob("gpt_search_plan.batch_*.raw.json"))) == 6
+    assert len((run / "formal_item_search_coverage.jsonl").read_text().splitlines()) == 30
+
+
 def test_limited_search_is_marked_incomplete_and_cannot_be_fetched(tmp_path: Path) -> None:
     extraction = tmp_path / "extraction"
     extraction.mkdir()
@@ -748,3 +808,13 @@ def test_transport_uses_post_for_long_requests(monkeypatch) -> None:
     assert captured == {"method": "POST", "url": "https://example.test"}
     ncbi._transport("https://example.test", {"term": "short", "email": "owner@example.test"}, 1)
     assert captured == {"method": "POST", "url": "https://example.test"}
+
+
+def test_load_jsonl_preserves_unicode_line_separator_inside_json_string(tmp_path: Path) -> None:
+    path = tmp_path / "articles.jsonl"
+    path.write_text(
+        json.dumps({"pmid": "1", "abstract": "first\u2028second"}, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+    assert load_jsonl(path) == [{"pmid": "1", "abstract": "first\u2028second"}]

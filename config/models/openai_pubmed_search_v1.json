@@ -6,5 +6,6 @@
   "prompt_version": "openai_pubmed_search_units_v1",
   "schema_version": "search_units_v1",
   "request_timeout_seconds": 1200,
-  "max_attempts": 3
+  "max_attempts": 3,
+  "batch_size": 5
 }

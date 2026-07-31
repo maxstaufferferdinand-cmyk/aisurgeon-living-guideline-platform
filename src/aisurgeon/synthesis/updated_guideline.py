@@ -38,7 +38,6 @@ SYNTHESIS_DECISIONS = {
 }
 PUBLIC_FORBIDDEN_TERMS = (
     "Evidence Packet",
-    "Mapping",
     "LLM confidence",
     "Debug",
     "Prompt",
@@ -133,6 +132,30 @@ def _source_id_from_records(records: list[dict[str, Any]]) -> str:
     if len(ids) != 1 or "None" in ids:
         raise ValueError("source_id mismatch in synthesis inputs")
     return ids.pop()
+
+
+def _readable_source_label(source_id: str) -> str:
+    label = source_id.replace("AWMF_", "AWMF ", 1).replace("_", " ")
+    return " ".join(label.split())
+
+
+def _full_document_title(source_id: str) -> str:
+    return (
+        "AISurgeon Aktualisierte Leitlinie "
+        f"{_readable_source_label(source_id)} - automatisierter Aktualisierungsentwurf 2026"
+    )
+
+
+def _full_docx_name(source_id: str) -> str:
+    safe = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in source_id)
+    return f"AISurgeon_Aktualisierte_Leitlinie_{safe}_2026.docx"
+
+
+def _summary_document_title(summary: dict[str, Any]) -> str:
+    title = summary.get("document_title")
+    if title:
+        return str(title)
+    return _full_document_title(str(summary.get("source_id") or "unbekannte_Leitlinie"))
 
 
 def _by_id(records: list[dict[str, Any]], key: str) -> dict[str, dict[str, Any]]:
@@ -565,18 +588,40 @@ def consolidate_references(
     articles_by_pmid = _by_id(articles, "pmid")
     old_by_number = _reference_lookup(old_references)
     entries: list[dict[str, Any]] = []
-    key_to_number: dict[tuple[str, str], int] = {}
-    old_number_map: dict[str, int] = {}
-    new_number_map: dict[str, int] = {}
+    key_to_number: dict[tuple[str, str], str | int] = {}
+    old_number_map: dict[str, str | int] = {}
+    new_number_map: dict[str, str | int] = {}
     findings: list[dict[str, Any]] = []
 
-    def add_entry(key: tuple[str, str], entry: dict[str, Any]) -> int:
+    def add_entry(key: tuple[str, str], entry: dict[str, Any]) -> str | int:
         if key in key_to_number:
             return key_to_number[key]
-        number = len(entries) + 1
+        if entry.get("source") == "new_pubmed":
+            number: str | int = f"N{sum(x.get('source') == 'new_pubmed' for x in entries) + 1}"
+        else:
+            number = len(entries) + 1
         key_to_number[key] = number
         entries.append({"final_reference_number": number, **entry})
         return number
+
+    for ref in old_references:
+        old_id = str(ref.get("original_reference_number") or "").strip()
+        if not old_id:
+            continue
+        old_number_map[old_id] = add_entry(
+            ("old", old_id),
+            {
+                "source": "original",
+                "internal_reference_id": ref.get("reference_id") or f"OLD-{old_id}",
+                "original_reference_number": old_id,
+                "pmid": None,
+                "doi": None,
+                "normalized_title": None,
+                "full_citation": ref["exact_original_reference_text"],
+                "used_in_formal_item_ids": [],
+                "first_seen_in_formal_item_id": None,
+            },
+        )
 
     for block in blocks:
         for old_id in block["old_reference_ids"]:
@@ -594,22 +639,6 @@ def consolidate_references(
                     }
                 )
                 continue
-            ref = old_by_number[old_id]
-            number = add_entry(
-                ("old", old_id),
-                {
-                    "source": "original",
-                    "internal_reference_id": ref.get("reference_id") or f"OLD-{old_id}",
-                    "original_reference_number": old_id,
-                    "pmid": None,
-                    "doi": None,
-                    "normalized_title": None,
-                    "full_citation": ref["exact_original_reference_text"],
-                    "used_in_formal_item_ids": [block["formal_item_id"]],
-                    "first_seen_in_formal_item_id": block["formal_item_id"],
-                },
-            )
-            old_number_map[old_id] = number
         for pmid in [
             *block["used_direct_pmids"],
             *block["used_indirect_pmids"],
@@ -667,6 +696,8 @@ def consolidate_references(
             if (old_hit or new_hit) and block["formal_item_id"] not in seen:
                 seen.append(block["formal_item_id"])
         entry["used_in_formal_item_ids"] = seen
+        if seen and entry.get("first_seen_in_formal_item_id") is None:
+            entry["first_seen_in_formal_item_id"] = seen[0]
     number_map = {
         "old_reference_numbers": old_number_map,
         "new_pubmed_pmids": new_number_map,
@@ -684,19 +715,47 @@ def consolidate_references(
     return entries, number_map, findings
 
 
-def _citation(numbers: list[int]) -> str:
-    values = sorted(set(numbers))
-    if not values:
+def replace_raw_pmids_in_update_text(
+    blocks: list[dict[str, Any]], number_map: dict[str, Any]
+) -> None:
+    pmid_map = {str(k): str(v) for k, v in number_map.get("new_pubmed_pmids", {}).items()}
+
+    def replace(text: str) -> str:
+        def repl(match: re.Match[str]) -> str:
+            pmid = match.group(1)
+            if pmid in pmid_map:
+                return f"[{pmid_map[pmid]}]"
+            return "[PubMed-Referenz nicht zugeordnet]"
+
+        return re.sub(r"\bPMID:?\s*(\d{5,})\b", repl, text)
+
+    for block in blocks:
+        for field in ("updated_item_text_de", "new_evidence_de", "conclusion_de"):
+            block[field] = replace(str(block.get(field) or ""))
+
+
+def _citation(numbers: list[Any]) -> str:
+    numeric_values = sorted({int(value) for value in numbers if isinstance(value, int)})
+    string_values = sorted(
+        {str(value) for value in numbers if not isinstance(value, int)},
+        key=lambda value: (not value.startswith("N"), value),
+    )
+    if not numeric_values and not string_values:
         return ""
     ranges: list[str] = []
-    start = prev = values[0]
-    for value in values[1:]:
+    if numeric_values:
+        start = prev = numeric_values[0]
+    else:
+        start = prev = None
+    for value in numeric_values[1:]:
         if value == prev + 1:
             prev = value
             continue
         ranges.append(f"{start}-{prev}" if start != prev else str(start))
         start = prev = value
-    ranges.append(f"{start}-{prev}" if start != prev else str(start))
+    if start is not None and prev is not None:
+        ranges.append(f"{start}-{prev}" if start != prev else str(start))
+    ranges.extend(string_values)
     return "[" + ", ".join(ranges) + "]"
 
 
@@ -749,7 +808,7 @@ def render_blocks_markdown(blocks: list[dict[str, Any]], number_map: dict[str, A
             for x in block["old_reference_ids"]
             if number_map["old_reference_numbers"].get(str(x)) is not None
         ]
-        citation_numbers += [int(x) for x in block["new_reference_ids"]]
+        citation_numbers += list(block["new_reference_ids"])
         citation = _citation(citation_numbers)
         lines.extend(
             [
@@ -816,9 +875,7 @@ def _w_box(title: str, text: str, *, changed: bool = False) -> str:
 def _docx_xml(
     blocks: list[dict[str, Any]], refs: list[dict[str, Any]], summary: dict[str, Any]
 ) -> str:
-    document_title = str(
-        summary.get("document_title") or "AISurgeon Aktualisierte Leitlinie GERD/EoE 2026"
-    )
+    document_title = _summary_document_title(summary)
     body = [
         _w_p(document_title, style="Title"),
         _w_p("Automatisch unterstützter wissenschaftlicher Aktualisierungsentwurf"),
@@ -1028,7 +1085,7 @@ def write_docx(
     header = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
         '<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
-        f"{_w_p('AISurgeon GERD/EoE Aktualisierungsentwurf')}</w:hdr>"
+        f"{_w_p(_summary_document_title(summary))}</w:hdr>"
     )
     footer = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
@@ -1036,9 +1093,7 @@ def write_docx(
         f"{_w_p('Seite X von Y | Automatisch unterstützter Entwurf - ')}"
         f"{_w_p('menschliche Validierung erforderlich')}</w:ftr>"
     )
-    document_title = escape(
-        str(summary.get("document_title") or "AISurgeon Aktualisierte Leitlinie GERD/EoE 2026")
-    )
+    document_title = escape(_summary_document_title(summary))
     core = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
         '<cp:coreProperties '
@@ -1326,6 +1381,7 @@ def build_updated_guideline(
     refs, number_map, reference_findings = consolidate_references(
         old_references=references, articles=articles, blocks=blocks
     )
+    replace_raw_pmids_in_update_text(blocks, number_map)
     markdown = render_blocks_markdown(blocks, number_map)
     synthesis_findings = [
         {
@@ -1346,7 +1402,7 @@ def build_updated_guideline(
         "document_title": (
             "LIMITED TEST OUTPUT - AISurgeon NET technical limited pilot subset"
             if technical_limited_document
-            else "AISurgeon Aktualisierte Leitlinie GERD/EoE 2026"
+            else _full_document_title(source_id)
         ),
         "formal_items": len(formal),
         "processed_formal_items": len(blocks),
@@ -1370,7 +1426,7 @@ def build_updated_guideline(
     docx_name = (
         "AISurgeon_LIMITED_TEST_OUTPUT_NET_subset_comments_arial_fixed.docx"
         if technical_limited_document
-        else "AISurgeon_Aktualisierte_Leitlinie_GERD_EoE_2026.docx"
+        else _full_docx_name(source_id)
     )
     docx_path = run_dir / docx_name
     if limit is None or technical_limited_document:

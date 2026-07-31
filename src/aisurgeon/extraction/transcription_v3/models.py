@@ -126,7 +126,17 @@ class TranscriptionJob(StrictModel):
     context_pages: list[int] = Field(default_factory=list)
     slice_page_map: list[SlicePageMapEntry] = Field(default_factory=list)
     reason: str
-    status: Literal["pending", "completed", "incomplete", "failed"] = "pending"
+    status: Literal[
+        "pending",
+        "completed",
+        "incomplete",
+        "failed",
+        "deferred_transient",
+        "failed_transient_exhausted",
+        "failed_nonretryable",
+        "skipped_compatible_completed",
+        "imported_compatible_raw_response",
+    ] = "pending"
 
 
 class CompletenessFinding(StrictModel):

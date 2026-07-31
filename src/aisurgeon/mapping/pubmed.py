@@ -2,8 +2,10 @@
 
 import json
 import subprocess
+import time
 from collections import defaultdict
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -192,20 +194,33 @@ def _validate_batch(
     draft = ScreeningBatchDraft.model_validate(raw)
     expected = {p["pmid"] for p in pairs}
     returned = [d.pmid for d in draft.decisions]
-    if set(returned) != expected or len(returned) != len(expected):
-        unknown = set(returned) - expected
-        if unknown:
-            raise ValueError(f"Unknown PMID returned by model: {sorted(unknown)}")
-        raise ValueError("Model must return exactly one decision per candidate pair")
+    unknown = set(returned) - expected
+    if unknown:
+        raise ValueError(f"Unknown PMID returned by model: {sorted(unknown)}")
     pair_by_pmid = {p["pmid"]: p for p in pairs}
     results = []
+    seen_pmids = set()
     for decision in draft.decisions:
+        if decision.pmid in seen_pmids:
+            continue
+        seen_pmids.add(decision.pmid)
         pair, abstract = pair_by_pmid[decision.pmid], articles[decision.pmid].get("abstract") or ""
         quote = decision.supporting_abstract_passage
         if quote and quote not in abstract:
-            raise ValueError(
-                f"Supporting abstract passage is not verbatim for PMID {decision.pmid}"
-            )
+            if decision.mapping_decision in {"include_direct", "include_indirect"}:
+                decision.supporting_abstract_passage = None
+                decision.review_required = True
+                reason = (
+                    "Model supplied a non-verbatim supporting abstract passage; "
+                    "mapping decision preserved with quote removed for review."
+                )
+                decision.uncertainty_reason = (
+                    f"{decision.uncertainty_reason} {reason}"
+                    if decision.uncertainty_reason
+                    else reason
+                )
+            else:
+                decision.supporting_abstract_passage = None
         value = decision.model_dump(mode="json")
         results.append(
             {
@@ -216,6 +231,37 @@ def _validate_batch(
                 "formal_item_id": pair["formal_item_id"],
                 "screening_method": "gpt_abstract_mapping",
                 **{k: v for k, v in value.items() if k != "pmid"},
+            }
+        )
+    for missing_pmid in sorted(expected - seen_pmids):
+        pair = pair_by_pmid[missing_pmid]
+        article = articles[missing_pmid]
+        results.append(
+            {
+                "schema_version": MAPPING_SCHEMA_VERSION,
+                "source_id": pair["source_id"],
+                "candidate_pair_id": pair["candidate_pair_id"],
+                "pmid": missing_pmid,
+                "formal_item_id": pair["formal_item_id"],
+                "screening_method": "deterministic_missing_model_decision_fallback",
+                "mapping_decision": "uncertain_review_required",
+                "relevance_score": 0,
+                "directness": "unclear",
+                "population_match": "unclear",
+                "intervention_or_exposure_match": "unclear",
+                "comparator_match": "unclear",
+                "outcome_match": "unclear",
+                "setting_match": "unclear",
+                "study_design_normalized": classify_study_design(article),
+                "publication_type_interpretation": "; ".join(article.get("publication_types", []))
+                or "No eligible PubMed publication type",
+                "concise_mapping_reason": (
+                    "OpenAI mapping response omitted this expected PMID after returning a "
+                    "schema-valid batch; retained as uncertain review-required evidence."
+                ),
+                "supporting_abstract_passage": None,
+                "uncertainty_reason": "Model omitted a required PMID-level mapping decision.",
+                "review_required": True,
             }
         )
     return results
@@ -244,13 +290,17 @@ def map_pubmed_evidence(
     api_key: SecretStr,
     resume_run: Path | None = None,
     batch_size: int = 10,
+    mapping_concurrency: int = 1,
     limit: int | None = None,
     retain_narrative_reviews: bool = False,
     client_factory: Callable[[SecretStr, dict[str, Any]], Any] = OpenAIMappingClient,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
+    sleep: Callable[[float], None] = time.sleep,
 ) -> Path:
     if batch_size < 1:
         raise ValueError("batch_size must be positive")
+    if mapping_concurrency < 1:
+        raise ValueError("mapping_concurrency must be positive")
     required = {
         extraction_run: [
             "formal_items.jsonl",
@@ -366,6 +416,73 @@ def map_pubmed_evidence(
             screening.append(deterministic)
     comments_by_id = {x.get("comment_id"): x for x in comments}
     formal_by_id = {x["formal_item_id"]: x for x in formal}
+    fingerprint_hash = sha256_text(json.dumps(fingerprint, sort_keys=True))
+    unresolved_batches = []
+
+    def screen_batch(task: dict[str, Any]) -> list[dict[str, Any]]:
+        key = task["key"]
+        batch = task["batch"]
+        payload = task["payload"]
+        decisions = None
+        client = client_factory(api_key, config)
+        for attempt in range(1, int(config["max_attempts"]) + 1):
+            raw_path = raw_dir / f"{key}.attempt-{attempt}.json"
+            if raw_path.exists():
+                try:
+                    decisions = _validate_batch(json.loads(raw_path.read_text()), batch, articles)
+                    break
+                except (RuntimeError, ValueError) as exc:
+                    error_path = raw_dir / f"{key}.attempt-{attempt}.error.json"
+                    if not error_path.exists():
+                        write_json(
+                            error_path,
+                            {
+                                "batch_key": key,
+                                "attempt": attempt,
+                                "error_type": type(exc).__name__,
+                                "error": str(exc),
+                            },
+                        )
+                    continue
+            try:
+                raw = client.create(prompt, payload)
+                if raw_path.exists():
+                    raw = json.loads(raw_path.read_text())
+                else:
+                    try:
+                        write_json(raw_path, raw)
+                    except FileExistsError:
+                        raw = json.loads(raw_path.read_text())
+                decisions = _validate_batch(raw, batch, articles)
+                break
+            except (RuntimeError, ValueError) as exc:
+                error_path = raw_dir / f"{key}.attempt-{attempt}.error.json"
+                if not error_path.exists():
+                    write_json(
+                        error_path,
+                        {
+                            "batch_key": key,
+                            "attempt": attempt,
+                            "error_type": type(exc).__name__,
+                            "error": str(exc),
+                        },
+                    )
+                if "HTTP 429" in str(exc) or "RateLimitError" in str(exc):
+                    sleep(min(60.0 * attempt, 300.0))
+        if decisions is None:
+            raise RuntimeError(f"Mapping batch {key} failed after controlled attempts")
+        checkpoint = checkpoint_dir / f"{key}.json"
+        if not checkpoint.exists():
+            write_json(
+                checkpoint,
+                {
+                    "status": "completed",
+                    "fingerprint_hash": fingerprint_hash,
+                    "decisions": decisions,
+                },
+            )
+        return decisions
+
     for item_id, item_pairs in by_item.items():
         item = formal_by_id[item_id]
         for offset in range(0, len(item_pairs), batch_size):
@@ -374,9 +491,7 @@ def map_pubmed_evidence(
             checkpoint = checkpoint_dir / f"{key}.json"
             if checkpoint.is_file():
                 saved = json.loads(checkpoint.read_text())
-                if saved.get("fingerprint_hash") != sha256_text(
-                    json.dumps(fingerprint, sort_keys=True)
-                ):
+                if saved.get("fingerprint_hash") != fingerprint_hash:
                     raise ValueError("Checkpoint fingerprint is incompatible")
                 screening.extend(saved["decisions"])
                 continue
@@ -409,38 +524,17 @@ def map_pubmed_evidence(
                     for p in batch
                 ],
             }
-            decisions = None
-            client = client_factory(api_key, config)
-            for attempt in range(1, int(config["max_attempts"]) + 1):
-                raw_path = raw_dir / f"{key}.attempt-{attempt}.json"
-                if raw_path.exists():
-                    continue
-                try:
-                    raw = client.create(prompt, payload)
-                    write_json(raw_path, raw)
-                    decisions = _validate_batch(raw, batch, articles)
-                    break
-                except (RuntimeError, ValueError) as exc:
-                    write_json(
-                        raw_dir / f"{key}.attempt-{attempt}.error.json",
-                        {
-                            "batch_key": key,
-                            "attempt": attempt,
-                            "error_type": type(exc).__name__,
-                            "error": str(exc),
-                        },
-                    )
-            if decisions is None:
-                raise RuntimeError(f"Mapping batch {key} failed after controlled attempts")
-            write_json(
-                checkpoint,
-                {
-                    "status": "completed",
-                    "fingerprint_hash": sha256_text(json.dumps(fingerprint, sort_keys=True)),
-                    "decisions": decisions,
-                },
-            )
-            screening.extend(decisions)
+            unresolved_batches.append({"key": key, "batch": batch, "payload": payload})
+    if mapping_concurrency == 1:
+        for task in unresolved_batches:
+            screening.extend(screen_batch(task))
+    else:
+        with ThreadPoolExecutor(max_workers=mapping_concurrency) as executor:
+            futures = {
+                executor.submit(screen_batch, task): task["key"] for task in unresolved_batches
+            }
+            for future in as_completed(futures):
+                screening.extend(future.result())
     if len(screening) != len(selected) or len({x["candidate_pair_id"] for x in screening}) != len(
         selected
     ):

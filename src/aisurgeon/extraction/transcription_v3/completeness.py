@@ -8,6 +8,7 @@ from aisurgeon.extraction.transcription_v3.models import (
     CompletenessFinding,
     ExecutionMode,
     ProviderCallEvidence,
+    SlicePageMapEntry,
     SourceContent,
     TranscriptionJob,
 )
@@ -90,8 +91,10 @@ def validate_transcription_completeness(
             )
         text_len = sum(
             len(block.exact_visible_text)
-            for block in content.visual_blocks
-            if block.page_number in job.primary_pages
+            for page in job.primary_pages
+            for page_content in by_page.get(page, [])
+            for block in page_content.visual_blocks
+            if block.page_number == page
         )
         expected_chars = sum(
             preflight_by_page[p].text_layer_character_count
@@ -110,7 +113,8 @@ def validate_transcription_completeness(
         for primary_page in job.primary_pages:
             page_text_len = sum(
                 len(block.exact_visible_text.strip())
-                for block in content.visual_blocks
+                for page_content in by_page.get(primary_page, [])
+                for block in page_content.visual_blocks
                 if block.page_number == primary_page
             )
             preflight = preflight_by_page.get(primary_page)
@@ -152,20 +156,39 @@ def validate_transcription_completeness(
 
 def split_incomplete_job(job: TranscriptionJob) -> list[TranscriptionJob]:
     """Split a problematic job into one primary-page job per page."""
-    return [
-        job.model_copy(
-            update={
-                "job_id": f"{job.job_id}-repair-{page:04d}",
-                "chunk_id": f"{job.chunk_id}-repair-{page:04d}",
-                "primary_pages": [page],
-                "context_pages": [
-                    p
-                    for p in (page - 1, page + 1)
-                    if p in {*job.context_pages, *job.primary_pages}
-                ],
-                "status": "pending",
-                "reason": f"targeted repair split from {job.job_id}",
-            }
+    split_jobs: list[TranscriptionJob] = []
+    source_pages = {entry.original_pdf_page_number for entry in job.slice_page_map}
+    for page in job.primary_pages:
+        context_pages = [
+            p
+            for p in (page - 1, page + 1)
+            if p in {*job.context_pages, *job.primary_pages, *source_pages}
+        ]
+        all_pages = sorted({page, *context_pages})
+        split_jobs.append(
+            job.model_copy(
+                update={
+                    "job_id": f"{job.job_id}-repair-{page:04d}",
+                    "chunk_id": f"{job.chunk_id}-repair-{page:04d}",
+                    "primary_pages": [page],
+                    "context_pages": context_pages,
+                    "slice_page_map": [
+                        SlicePageMapEntry(
+                            slice_page_index=index,
+                            original_pdf_page_number=source_page,
+                            role=(
+                                "primary"
+                                if source_page == page
+                                else "previous_context"
+                                if source_page < page
+                                else "next_context"
+                            ),
+                        )
+                        for index, source_page in enumerate(all_pages, start=1)
+                    ],
+                    "status": "pending",
+                    "reason": f"targeted repair split from {job.job_id}",
+                }
+            )
         )
-        for page in job.primary_pages
-    ]
+    return split_jobs

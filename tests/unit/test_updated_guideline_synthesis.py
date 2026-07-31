@@ -8,11 +8,41 @@ from pydantic import SecretStr
 
 from aisurgeon.synthesis.updated_guideline import (
     NO_ORIGINAL_COMMENT_TEXT,
+    PUBLIC_FORBIDDEN_TERMS,
     build_item_evidence_packets,
     build_updated_guideline,
     consolidate_references,
+    replace_raw_pmids_in_update_text,
     validate_synthesis,
 )
+
+
+def test_public_forbidden_terms_do_not_block_clinical_mapping_biopsy_text() -> None:
+    assert "Mapping" not in PUBLIC_FORBIDDEN_TERMS
+    clinical_text = "Mapping-Biopsie der Magenschleimhaut"
+    assert not any(term in clinical_text for term in PUBLIC_FORBIDDEN_TERMS)
+
+
+def test_raw_pmids_are_replaced_in_generated_update_text_only() -> None:
+    blocks = [
+        {
+            "exact_original_item_text": "Original PMID: 12345 bleibt Quelle.",
+            "updated_item_text_de": "Neue Empfehlung nach PMID: 123456.",
+            "new_evidence_de": "Neue Evidenz PMID 234567 und PMID: 99999.",
+            "conclusion_de": "Schluss aus PMID: 123456.",
+        }
+    ]
+
+    replace_raw_pmids_in_update_text(
+        blocks, {"new_pubmed_pmids": {"123456": "N1", "234567": "N2"}}
+    )
+
+    assert blocks[0]["exact_original_item_text"] == "Original PMID: 12345 bleibt Quelle."
+    assert blocks[0]["updated_item_text_de"] == "Neue Empfehlung nach [N1]."
+    assert blocks[0]["new_evidence_de"] == (
+        "Neue Evidenz [N2] und [PubMed-Referenz nicht zugeordnet]."
+    )
+    assert blocks[0]["conclusion_de"] == "Schluss aus [N1]."
 
 
 def _json(path: Path, value: dict) -> None:
@@ -375,10 +405,12 @@ def test_references_are_consolidated_by_first_appearance_and_deduplicated() -> N
         articles=[_article("10", doi="10/x"), _article("11", doi="10/x"), _article("12")],
         blocks=blocks,
     )
-    assert [r["final_reference_number"] for r in refs] == [1, 2, 3, 4]
-    assert number_map["old_reference_numbers"] == {"1": 1, "2": 3}
-    assert number_map["new_pubmed_pmids"]["10"] == 2
-    assert number_map["new_pubmed_pmids"]["11"] == 2
+    assert [r["final_reference_number"] for r in refs] == [1, 2, "N1", "N2"]
+    assert [r["source"] for r in refs] == ["original", "original", "new_pubmed", "new_pubmed"]
+    assert number_map["old_reference_numbers"] == {"1": 1, "2": 2}
+    assert number_map["new_pubmed_pmids"]["10"] == "N1"
+    assert number_map["new_pubmed_pmids"]["11"] == "N1"
+    assert number_map["new_pubmed_pmids"]["12"] == "N2"
     assert findings == []
 
 
@@ -438,11 +470,16 @@ def test_docx_structure_unmodified_not_duplicated_modified_separated_and_resume(
             resume_run=run,
             client_factory=lambda key, config: Fake(),
         )
-    docx = run / "AISurgeon_Aktualisierte_Leitlinie_GERD_EoE_2026.docx"
+    docx = run / "AISurgeon_Aktualisierte_Leitlinie_SRC_2026.docx"
     with zipfile.ZipFile(docx) as archive:
         xml = archive.read("word/document.xml").decode("utf-8")
+        header = archive.read("word/header1.xml").decode("utf-8")
         styles = archive.read("word/styles.xml").decode("utf-8")
         font_table = archive.read("word/fontTable.xml").decode("utf-8")
+        assert "AISurgeon Aktualisierte Leitlinie SRC" in xml
+        assert "AISurgeon Aktualisierte Leitlinie SRC" in header
+        assert "GERD/EoE" not in xml
+        assert "GERD/EoE" not in header
         assert "TOC" in xml and "Heading1" in xml
         assert "w:hanging" in xml
         assert "Alte Empfehlung" in xml
@@ -588,4 +625,4 @@ def test_limited_run_has_no_final_docx(tmp_path: Path) -> None:
     )
     manifest = json.loads((run / "synthesis_manifest.json").read_text())
     assert manifest["status"] == "technical_limited"
-    assert not (run / "AISurgeon_Aktualisierte_Leitlinie_GERD_EoE_2026.docx").exists()
+    assert not (run / "AISurgeon_Aktualisierte_Leitlinie_SRC_2026.docx").exists()

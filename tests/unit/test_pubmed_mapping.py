@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 from pydantic import SecretStr
 
+import aisurgeon.mapping.pubmed as pubmed_module
 from aisurgeon.mapping.pubmed import (
     _validate_batch,
     build_candidate_pairs,
@@ -43,6 +44,23 @@ def _decision(pmid: str, *, quote: str | None = "Useful") -> dict:
     }
 
 
+def _excluded_decision(pmid: str, *, quote: str | None = "not exact") -> dict:
+    value = _decision(pmid, quote=quote)
+    value.update(
+        {
+            "mapping_decision": "exclude_wrong_population",
+            "relevance_score": 0,
+            "directness": "not_relevant",
+            "population_match": "mismatch",
+            "intervention_or_exposure_match": "mismatch",
+            "outcome_match": "mismatch",
+            "setting_match": "mismatch",
+            "concise_mapping_reason": "Wrong population.",
+        }
+    )
+    return value
+
+
 def test_candidate_provenance_deduplicates_and_preserves_many_to_many() -> None:
     formal = [
         {"formal_item_id": "F1", "sequence_number": 1, "normalized_item_family": "recommendation"},
@@ -73,8 +91,35 @@ def test_model_ids_and_abstract_quotes_are_strictly_validated() -> None:
     )
     with pytest.raises(ValueError, match="Unknown PMID"):
         _validate_batch({"decisions": [_decision("2")]}, [pair], articles)
-    with pytest.raises(ValueError, match="not verbatim"):
-        _validate_batch({"decisions": [_decision("1", quote="invented")]}, [pair], articles)
+    included = _validate_batch({"decisions": [_decision("1", quote="invented")]}, [pair], articles)[
+        0
+    ]
+    assert included["supporting_abstract_passage"] is None
+    assert included["review_required"] is True
+    assert "non-verbatim" in included["uncertainty_reason"]
+    excluded = _validate_batch(
+        {"decisions": [_excluded_decision("1", quote="invented")]}, [pair], articles
+    )[0]
+    assert excluded["supporting_abstract_passage"] is None
+
+
+def test_missing_model_mapping_decision_becomes_review_required_uncertain_row() -> None:
+    pairs = [
+        {"source_id": "SRC", "candidate_pair_id": "P1", "pmid": "1", "formal_item_id": "F1"},
+        {"source_id": "SRC", "candidate_pair_id": "P2", "pmid": "2", "formal_item_id": "F1"},
+    ]
+    articles = {
+        "1": {"abstract": "Useful exact passage.", "publication_types": ["Meta-Analysis"]},
+        "2": {"abstract": "Useful exact passage.", "publication_types": ["Systematic Review"]},
+    }
+
+    rows = _validate_batch({"decisions": [_decision("1")]}, pairs, articles)
+
+    missing = next(row for row in rows if row["pmid"] == "2")
+    assert missing["mapping_decision"] == "uncertain_review_required"
+    assert missing["screening_method"] == "deterministic_missing_model_decision_fallback"
+    assert missing["review_required"] is True
+    assert missing["study_design_normalized"] == "systematic_review"
 
 
 @pytest.mark.parametrize(
@@ -234,6 +279,63 @@ def test_completed_with_review_fetch_is_accepted_for_mapping(tmp_path: Path) -> 
     assert json.loads((run / "mapping_manifest.json").read_text())["status"] == "completed"
 
 
+def test_mapping_concurrency_preserves_complete_outputs(tmp_path: Path) -> None:
+    extraction, search, fetch = _runs(tmp_path)
+
+    class Fake:
+        def create(self, prompt, payload):
+            return {"decisions": [_decision(x["pmid"]) for x in payload["articles"]]}
+
+    run = map_pubmed_evidence(
+        extraction_run=extraction,
+        search_run=search,
+        fetch_run=fetch,
+        output_root=tmp_path,
+        worker_id="w",
+        api_key=SecretStr("secret"),
+        batch_size=1,
+        mapping_concurrency=2,
+        client_factory=lambda key, config: Fake(),
+    )
+    assert len((run / "article_screening.jsonl").read_text().splitlines()) == 4
+    assert json.loads((run / "mapping_manifest.json").read_text())["status"] == "completed"
+
+
+def test_raw_response_file_exists_race_is_idempotent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    extraction, search, fetch = _runs(tmp_path)
+    original_write_json = pubmed_module.write_json
+    raced = False
+
+    def racing_write_json(path: Path, value: dict) -> None:
+        nonlocal raced
+        if path.name.endswith(".attempt-1.json") and not raced:
+            raced = True
+            original_write_json(path, value)
+            raise FileExistsError(path)
+        original_write_json(path, value)
+
+    class Fake:
+        def create(self, prompt, payload):
+            return {"decisions": [_decision(x["pmid"]) for x in payload["articles"]]}
+
+    monkeypatch.setattr(pubmed_module, "write_json", racing_write_json)
+
+    run = map_pubmed_evidence(
+        extraction_run=extraction,
+        search_run=search,
+        fetch_run=fetch,
+        output_root=tmp_path,
+        worker_id="w",
+        api_key=SecretStr("secret"),
+        client_factory=lambda key, config: Fake(),
+    )
+
+    assert raced is True
+    assert json.loads((run / "mapping_manifest.json").read_text())["status"] == "completed"
+
+
 def test_invalid_structured_response_is_retried_at_most_controlled_attempts(
     tmp_path: Path,
 ) -> None:
@@ -260,6 +362,35 @@ def test_invalid_structured_response_is_retried_at_most_controlled_attempts(
     )
     assert calls == 5
     assert list((run / "raw_model_responses").glob("*.error.json"))
+
+
+def test_rate_limit_mapping_error_waits_before_retry(tmp_path: Path) -> None:
+    extraction, search, fetch = _runs(tmp_path)
+    calls = 0
+    sleeps: list[float] = []
+
+    class Fake:
+        def create(self, prompt, payload):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("OpenAI mapping request failed (RateLimitError, HTTP 429)")
+            return {"decisions": [_decision(x["pmid"]) for x in payload["articles"]]}
+
+    run = map_pubmed_evidence(
+        extraction_run=extraction,
+        search_run=search,
+        fetch_run=fetch,
+        output_root=tmp_path,
+        worker_id="w",
+        api_key=SecretStr("secret"),
+        client_factory=lambda key, config: Fake(),
+        sleep=sleeps.append,
+    )
+
+    assert calls == 5
+    assert sleeps == [60.0]
+    assert json.loads((run / "mapping_manifest.json").read_text())["status"] == "completed"
 
 
 def test_pre_mapping_filter_excludes_ineligible_designs_before_gpt(tmp_path: Path) -> None:

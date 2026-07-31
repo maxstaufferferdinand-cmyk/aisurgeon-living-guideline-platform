@@ -12,10 +12,27 @@ EVIDENCE_TYPE_FILTER = (
     '("Randomized Controlled Trial"[pt] OR "Meta-Analysis"[pt] OR "Systematic Review"[pt])'
 )
 EXCLUSION_FILTER = 'NOT ("Practice Guideline"[pt] OR "Guideline"[pt])'
+FIELD_TERM_PATTERN = re.compile(
+    r'(?P<prefix>^|[\s(])(?P<term>(?!"|AND\b|OR\b|NOT\b)[A-Za-z0-9][A-Za-z0-9*.-]*'
+    r'(?:[ -][A-Za-z0-9*.-]+)*)(?P<field>\[(?:tiab|Title/Abstract|All Fields)\])',
+    flags=re.IGNORECASE,
+)
 
 
 def sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
+
+
+def sanitize_query_core(query: str) -> str:
+    """Quote unquoted PubMed fielded phrases that NCBI parses as syntax errors."""
+
+    def replace(match: re.Match[str]) -> str:
+        term = match.group("term")
+        if " " not in term and "-" not in term:
+            return match.group(0)
+        return f'{match.group("prefix")}"{term}"{match.group("field")}'
+
+    return FIELD_TERM_PATTERN.sub(replace, query)
 
 
 def validate_query_core(query: str) -> list[str]:
@@ -52,8 +69,11 @@ def validate_query_core(query: str) -> list[str]:
         re.IGNORECASE,
     ):
         errors.append("possible_german_search_term")
-    normalized_terms = [term.casefold() for term in re.findall(r'"([^"]+)"', query)]
-    if len(normalized_terms) - len(set(normalized_terms)) > 5:
+    normalized_terms = [
+        f"{term.casefold()}{field.casefold()}"
+        for term, field in re.findall(r'"([^"]+)"\s*(\[[^\]]+\])?', query)
+    ]
+    if len(normalized_terms) - len(set(normalized_terms)) > 20:
         errors.append("obviously_redundant_terms")
     return list(dict.fromkeys(errors))
 
@@ -83,7 +103,7 @@ def build_query(
     model_config: dict[str, object],
     model_config_hash: str,
 ) -> PubMedQuery:
-    core = (unit.query_core or "").strip()
+    core = sanitize_query_core((unit.query_core or "").strip())
     errors = validate_query_core(core)
     if errors:
         raise ValueError(f"Invalid query_core: {', '.join(errors)}")

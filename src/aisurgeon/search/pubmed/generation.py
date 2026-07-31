@@ -28,6 +28,7 @@ from aisurgeon.search.pubmed.query import (
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
 MODEL_CONFIG_PATH = PROJECT_ROOT / "config/models/openai_pubmed_search_v1.json"
 PROMPT_PATH = PROJECT_ROOT / "config/prompts/openai_pubmed_search_units_v1.txt"
+DEFAULT_SEARCH_BATCH_SIZE = 25
 
 
 def derive_start_date_from_extraction_manifest(
@@ -82,7 +83,12 @@ def file_hash(path: Path) -> str:
 
 
 def load_jsonl(path: Path) -> list[dict[str, Any]]:
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+    with path.open(encoding="utf-8") as stream:
+        return [json.loads(line) for line in stream if line.strip()]
+
+
+def _chunks(values: list[dict[str, Any]], size: int) -> list[list[dict[str, Any]]]:
+    return [values[index : index + size] for index in range(0, len(values), size)]
 
 
 def normalize_search_plan(
@@ -292,7 +298,25 @@ def generate_searches(
     if raw_plan_path.exists():
         raw_plan = json.loads(raw_plan_path.read_text(encoding="utf-8"))
     else:
-        raw_plan = client_factory(api_key, config).create(prompt, payload)
+        batch_size = int(config.get("batch_size") or DEFAULT_SEARCH_BATCH_SIZE)
+        if batch_size < 1:
+            raise ValueError("Search generation batch_size must be positive")
+        client = client_factory(api_key, config)
+        plans: list[dict[str, Any]] = []
+        for batch_index, formal_batch in enumerate(_chunks(formal, batch_size), start=1):
+            batch_path = run_dir / f"gpt_search_plan.batch_{batch_index:04d}.raw.json"
+            if batch_path.exists():
+                batch_plan = json.loads(batch_path.read_text(encoding="utf-8"))
+            else:
+                batch_payload = {**payload, "formal_items": formal_batch}
+                batch_plan = client.create(prompt, batch_payload)
+                write_json(batch_path, batch_plan)
+            plans.append(batch_plan)
+        raw_plan = {
+            "search_units": [
+                unit for plan in plans for unit in plan.get("search_units", [])
+            ]
+        }
         write_json(raw_plan_path, raw_plan)
     draft = SearchPlanDraft.model_validate(raw_plan)
     unknown_comment_ids = {

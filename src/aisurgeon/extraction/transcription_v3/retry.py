@@ -4,6 +4,12 @@ from dataclasses import dataclass
 from typing import Literal
 
 RetryCategory = Literal["retryable", "non_retryable"]
+FailureCategory = Literal[
+    "rate_or_quota",
+    "provider_capacity_unavailable",
+    "transient_provider_or_network",
+    "non_retryable_provider_or_local_failure",
+]
 
 
 @dataclass(frozen=True)
@@ -12,7 +18,7 @@ class RetryDecision:
     safe_exception_class: str
     http_status: int | None
     calculated_delay_seconds: float | None
-    final_failure_category: str
+    final_failure_category: FailureCategory
 
 
 RETRYABLE_HTTP = {408, 429, 500, 502, 503, 504}
@@ -33,7 +39,9 @@ def classify_provider_failure(
     name = type(exc).__name__
     message = str(exc).casefold()
     transient_name = any(token in name.lower() for token in ("timeout", "connection", "dns"))
+    malformed_model_json = name == "JSONDecodeError"
     retryable = status in RETRYABLE_HTTP or transient_name or "connection reset" in message
+    retryable = retryable or malformed_model_json
     if (
         status in NON_RETRYABLE_HTTP
         or "invalid api key" in message
@@ -46,7 +54,15 @@ def classify_provider_failure(
             delay = max(delay, retry_after_seconds)
         if jitter_fraction:
             delay *= 1 + jitter_fraction
-        return RetryDecision("retryable", name, status, delay, "transient_provider_failure")
+        if status == 429 or "resource_exhausted" in message:
+            final_category: FailureCategory = "rate_or_quota"
+        elif status == 503 or "unavailable" in message or "high demand" in message:
+            final_category = "provider_capacity_unavailable"
+        elif malformed_model_json:
+            final_category = "transient_provider_or_network"
+        else:
+            final_category = "transient_provider_or_network"
+        return RetryDecision("retryable", name, status, delay, final_category)
     return RetryDecision(
         "non_retryable",
         name,

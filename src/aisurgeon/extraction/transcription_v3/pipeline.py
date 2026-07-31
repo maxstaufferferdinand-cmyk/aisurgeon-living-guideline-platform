@@ -4,7 +4,8 @@ import hashlib
 import json
 import random
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -21,7 +22,10 @@ from aisurgeon.extraction.gemini.document_map import (
 from aisurgeon.extraction.gemini.errors import GeminiResponseValidationError
 from aisurgeon.extraction.pdf_preflight import PdfPagePreflight, PdfPreflight, run_pdf_preflight
 from aisurgeon.extraction.pdf_registration import register_pdf
-from aisurgeon.extraction.transcription_v3.completeness import validate_transcription_completeness
+from aisurgeon.extraction.transcription_v3.completeness import (
+    split_incomplete_job,
+    validate_transcription_completeness,
+)
 from aisurgeon.extraction.transcription_v3.models import (
     CANONICAL_TRANSCRIPTION_SCHEMA_VERSION,
     SCOUT_PROMPT_VERSION,
@@ -49,6 +53,35 @@ SYNTHETIC_MARKERS = (
     "synthetic_monotonic",
     "mocked_scout_in_dry_or_test_run",
 )
+TRANSIENT_FAILURE_CATEGORIES = {
+    "rate_or_quota",
+    "provider_capacity_unavailable",
+    "transient_provider_or_network",
+}
+
+
+@dataclass
+class DeferredJobFailure:
+    job: TranscriptionJob
+    status: str
+    evidence: ProviderCallEvidence | None
+    error: Exception
+
+
+class TranscriptionJobFailure(RuntimeError):
+    def __init__(
+        self,
+        *,
+        job: TranscriptionJob,
+        status: str,
+        evidence: ProviderCallEvidence | None,
+        cause: Exception,
+    ) -> None:
+        super().__init__(f"Transcription job {job.job_id} failed with status {status}")
+        self.job = job
+        self.status = status
+        self.evidence = evidence
+        self.__cause__ = cause
 
 
 def _sha256_json(value: Any) -> str:
@@ -85,6 +118,49 @@ def inject_source_content_metadata(
     )
 
 
+def canonicalize_source_content_pages(
+    draft: SourceContentDraft, *, job: TranscriptionJob
+) -> SourceContentDraft:
+    """Map Gemini-returned page labels to original PDF primary pages."""
+    original_pages = {entry.original_pdf_page_number for entry in job.slice_page_map}
+    slice_to_original = {
+        entry.slice_page_index: entry.original_pdf_page_number for entry in job.slice_page_map
+    }
+    primary_pages = set(job.primary_pages)
+    block_page_numbers = [block.page_number for block in draft.visual_blocks]
+    unique_block_pages = list(dict.fromkeys(block_page_numbers))
+
+    if set(unique_block_pages).issubset(original_pages):
+        page_map = {page: page for page in unique_block_pages}
+    elif len(unique_block_pages) == 1 and len(job.primary_pages) == 1:
+        page_map = {unique_block_pages[0]: job.primary_pages[0]}
+    elif set(unique_block_pages).issubset(slice_to_original):
+        page_map = {page: slice_to_original[page] for page in unique_block_pages}
+    elif len(unique_block_pages) == len(job.primary_pages):
+        page_map = dict(zip(unique_block_pages, job.primary_pages, strict=True))
+    elif len(unique_block_pages) == len(job.slice_page_map):
+        page_map = {
+            page: entry.original_pdf_page_number
+            for page, entry in zip(unique_block_pages, job.slice_page_map, strict=True)
+        }
+    elif len(job.primary_pages) == 1:
+        page_map = {page: job.primary_pages[0] for page in unique_block_pages}
+    else:
+        page_map = {page: page for page in unique_block_pages}
+
+    blocks = []
+    for block in draft.visual_blocks:
+        mapped_page = page_map.get(block.page_number, block.page_number)
+        if mapped_page in primary_pages:
+            blocks.append(block.model_copy(update={"page_number": mapped_page}))
+    return draft.model_copy(
+        update={
+            "represented_original_pdf_pages": list(job.primary_pages),
+            "visual_blocks": blocks,
+        }
+    )
+
+
 def create_pdf_slice(pdf_path: Path, job: TranscriptionJob, output_path: Path) -> None:
     reader = PdfReader(pdf_path, strict=True)
     writer = PdfWriter()
@@ -93,6 +169,186 @@ def create_pdf_slice(pdf_path: Path, job: TranscriptionJob, output_path: Path) -
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("wb") as stream:
         writer.write(stream)
+
+
+def _write_json_replace(path: Path, value: Any) -> None:
+    if hasattr(value, "model_dump"):
+        value = value.model_dump(mode="json")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _write_jsonl_replace(path: Path, records: Iterable[Any]) -> None:
+    lines = []
+    for record in records:
+        value = record.model_dump(mode="json") if hasattr(record, "model_dump") else record
+        lines.append(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(("\n".join(lines) + "\n") if lines else "", encoding="utf-8")
+
+
+def _append_jsonl(path: Path, values: list[BaseModel]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as stream:
+        for value in values:
+            stream.write(value.model_dump_json() + "\n")
+
+
+def _prune_invalid_jsonl(path: Path) -> None:
+    if not path.is_file():
+        return
+    valid_lines: list[str] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        valid_lines.append(line)
+    path.write_text("".join(f"{line}\n" for line in valid_lines), encoding="utf-8")
+
+
+def _sleep_with_progress(
+    *,
+    seconds: float,
+    sleep: Callable[[float], None],
+    message: str,
+    progress_interval_seconds: int = 60,
+) -> None:
+    remaining = max(0.0, seconds)
+    if remaining <= 0:
+        return
+    print(message, flush=True)
+    while remaining > 0:
+        step = min(remaining, float(progress_interval_seconds))
+        sleep(step)
+        remaining -= step
+        if remaining > 0 and seconds >= progress_interval_seconds:
+            print(f"Still waiting: {round(remaining)} seconds remaining.", flush=True)
+
+
+def _is_transient_evidence(evidence: ProviderCallEvidence | None) -> bool:
+    return bool(evidence and evidence.final_failure_category in TRANSIENT_FAILURE_CATEGORIES)
+
+
+def _write_last_error(
+    job_dir: Path,
+    *,
+    job: TranscriptionJob,
+    status: str,
+    evidence: ProviderCallEvidence | None,
+    exc: Exception,
+) -> None:
+    _write_json_replace(
+        job_dir / "last_error.json",
+        {
+            "status": status,
+            "job_id": job.job_id,
+            "primary_pages": job.primary_pages,
+            "safe_error_class": type(exc).__name__,
+            "safe_error_message": str(exc)[:500],
+            "http_status": evidence.http_status if evidence is not None else None,
+            "api_status": evidence.api_status if evidence is not None else None,
+            "final_failure_category": (
+                evidence.final_failure_category if evidence is not None else None
+            ),
+            "retry_after_seconds": evidence.retry_after_seconds if evidence is not None else None,
+        },
+    )
+    _write_json_replace(job_dir / "checkpoint.json", {"status": status, "job_id": job.job_id})
+
+
+def _read_job_attempts(run_dir: Path) -> list[ProviderCallEvidence]:
+    attempts: list[ProviderCallEvidence] = []
+    for path in sorted((run_dir / "transcription_jobs").glob("*/attempts.jsonl")):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                attempts.append(ProviderCallEvidence.model_validate_json(line))
+            except ValidationError:
+                continue
+    return attempts
+
+
+def _medium_retry_job(job: TranscriptionJob) -> TranscriptionJob:
+    return job.model_copy(
+        update={
+            "job_id": f"{job.job_id}-medium",
+            "chunk_id": f"{job.chunk_id}-medium",
+            "status": "pending",
+            "reason": f"{job.reason}; medium_resolution_retry",
+        }
+    )
+
+
+def _can_retry_at_medium(job: TranscriptionJob) -> bool:
+    return (
+        len(job.primary_pages) == 1
+        and "medium_resolution_retry" not in job.reason
+        and _media_resolution_for_job(job) == "high"
+    )
+
+
+def _sort_contents_by_page(contents: dict[str, SourceContent]) -> list[SourceContent]:
+    return sorted(
+        contents.values(),
+        key=lambda content: (
+            min(content.represented_original_pdf_pages),
+            content.job_id,
+        ),
+    )
+
+
+def _one_page_repair_job(
+    *,
+    source_id: str,
+    page: int,
+    page_count: int,
+    profile: str,
+    cycle: int,
+) -> TranscriptionJob:
+    context_pages = [p for p in (page - 1, page + 1) if 1 <= p <= page_count]
+    all_pages = sorted({page, *context_pages})
+    return TranscriptionJob.model_validate(
+        {
+            "job_id": f"tx3-repair-c{cycle:02d}-p{page:04d}",
+            "chunk_id": f"{source_id}-repair-c{cycle:02d}-p{page:04d}",
+            "profile": profile,
+            "primary_pages": [page],
+            "context_pages": context_pages,
+            "slice_page_map": [
+                {
+                    "slice_page_index": index,
+                    "original_pdf_page_number": source_page,
+                    "role": (
+                        "primary"
+                        if source_page == page
+                        else "previous_context"
+                        if source_page < page
+                        else "next_context"
+                    ),
+                }
+                for index, source_page in enumerate(all_pages, start=1)
+            ],
+            "reason": "targeted completeness repair for unresolved primary page",
+        }
+    )
+
+
+def _repair_pages_from_findings(findings: list[CompletenessFinding]) -> set[int]:
+    repair_codes = {
+        "missing_primary_page",
+        "empty_nonblank_primary_page",
+    }
+    return {
+        finding.page_number
+        for finding in findings
+        if finding.severity == "error"
+        and finding.page_number is not None
+        and finding.issue_code in repair_codes
+    }
 
 
 def _load_v3_config(project_root: Path) -> dict[str, Any]:
@@ -200,6 +456,18 @@ def _safe_finish_reason(response: Any) -> str | None:
     return None
 
 
+def _raw_response_snapshot(response: Any) -> dict[str, Any]:
+    text = getattr(response, "text", None)
+    return {
+        "raw_text": text if isinstance(text, str) else None,
+        "response_id": getattr(response, "id", None),
+        "request_id": getattr(response, "request_id", None),
+        "finish_reason": _safe_finish_reason(response),
+        "token_usage": _safe_usage(getattr(response, "usage_metadata", None)),
+        "parse_status": "unparsed_or_invalid_json",
+    }
+
+
 def _safe_status(exc: Exception) -> tuple[int | None, str | None, float | None]:
     status = getattr(exc, "status_code", None) or getattr(exc, "code", None)
     status = status if isinstance(status, int) else None
@@ -219,6 +487,8 @@ def _safe_status(exc: Exception) -> tuple[int | None, str | None, float | None]:
 def _media_resolution_for_job(job: TranscriptionJob | None) -> str:
     if job is None:
         return "high"
+    if "medium_resolution_retry" in job.reason:
+        return "medium"
     if job.profile == "single_column_prose_verbatim":
         return "medium"
     return "high"
@@ -388,7 +658,12 @@ class GeminiTranscriptionProvider:
                 contents=[pdf_part, prompt],
                 config=self._config(schema_model, media_resolution),
             )
-            payload = self._parse_payload(response)
+            try:
+                payload = self._parse_payload(response)
+            except Exception:
+                if job_id is not None:
+                    self.raw_responses[job_id] = _raw_response_snapshot(response)
+                raise
             evidence = self._evidence(
                 stage=stage,
                 job_id=job_id,
@@ -438,7 +713,12 @@ class GeminiTranscriptionProvider:
                 contents=[remote, prompt],
                 config=self._config(schema_model, media_resolution),
             )
-            payload = self._parse_payload(response)
+            try:
+                payload = self._parse_payload(response)
+            except Exception:
+                if job_id is not None:
+                    self.raw_responses[job_id] = _raw_response_snapshot(response)
+                raise
             evidence = self._evidence(
                 stage=stage,
                 job_id=job_id,
@@ -496,7 +776,12 @@ class GeminiTranscriptionProvider:
     def transcribe(
         self, slice_path: Path, prompt: str, job: TranscriptionJob
     ) -> SourceContentDraft:
-        max_attempts = int(self.model_config["max_attempts"])
+        max_attempts = int(
+            self.model_config.get("max_attempts_per_call", self.model_config["max_attempts"])
+        )
+        defer_after_capacity = int(
+            self.model_config.get("defer_after_consecutive_capacity_errors_per_job", max_attempts)
+        )
         last_exc: Exception | None = None
         for attempt in range(1, max_attempts + 1):
             start_index = len(self.evidence)
@@ -530,13 +815,40 @@ class GeminiTranscriptionProvider:
                     max_delay_seconds=float(self.model_config["retry_max_delay_seconds"]),
                     jitter_fraction=float(self.model_config["retry_jitter_fraction"]),
                 )
+                if (
+                    decision.final_failure_category
+                    in {"provider_capacity_unavailable", "rate_or_quota"}
+                    and attempt >= defer_after_capacity
+                ):
+                    if self.evidence:
+                        self.evidence[-1].calculated_delay_seconds = None
+                    raise
+                if type(exc).__name__ == "JSONDecodeError":
+                    if self.evidence:
+                        self.evidence[-1].calculated_delay_seconds = None
+                    raise
                 if decision.category == "non_retryable" or attempt >= max_attempts:
+                    if self.evidence:
+                        self.evidence[-1].calculated_delay_seconds = None
                     raise
                 delay = decision.calculated_delay_seconds or 0
                 jitter = self._random_uniform(0, delay * 0.1) if delay else 0
                 if self.evidence:
                     self.evidence[-1].calculated_delay_seconds = delay + jitter
-                self._sleep(delay + jitter)
+                status_label = (
+                    f"HTTP {self.evidence[-1].http_status} {self.evidence[-1].api_status}"
+                    if self.evidence
+                    else "transient Gemini error"
+                )
+                _sleep_with_progress(
+                    seconds=delay + jitter,
+                    sleep=self._sleep,
+                    message=(
+                        f"[Gemini {job.job_id}] {status_label}. "
+                        f"Attempt {attempt}/{max_attempts} failed. "
+                        f"Next retry in {round(delay + jitter)} seconds."
+                    ),
+                )
         raise RuntimeError("Gemini transcription failed") from last_exc
 
 
@@ -584,41 +896,82 @@ def _write_job_artifacts(
     raw_path = job_dir / "raw_response.json"
     validated_path = job_dir / "validated_source_content.json"
     checkpoint_path = job_dir / "checkpoint.json"
+    last_error_path = job_dir / "last_error.json"
     if checkpoint_path.is_file():
         checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
         if checkpoint.get("status") == "completed" and validated_path.is_file():
-            return SourceContent.model_validate_json(validated_path.read_text(encoding="utf-8"))
+            content = SourceContent.model_validate_json(validated_path.read_text(encoding="utf-8"))
+            if (
+                content.represented_original_pdf_pages == job.primary_pages
+                and all(block.page_number in job.primary_pages for block in content.visual_blocks)
+            ):
+                return content
+            if raw_path.is_file():
+                draft = canonicalize_source_content_pages(
+                    SourceContentDraft.model_validate_json(raw_path.read_text(encoding="utf-8")),
+                    job=job,
+                )
+                content = inject_source_content_metadata(draft, source_id=source_id, job=job)
+                _write_json_replace(validated_path, content)
+                return content
+    for path in (raw_path, validated_path, checkpoint_path):
+        if path.exists():
+            path.unlink()
     create_pdf_slice(pdf_path, job, job_dir / "slice.pdf")
-    write_json(
+    _write_json_replace(
         job_dir / "slice_page_map.json",
         [entry.model_dump() for entry in job.slice_page_map],
     )
     (job_dir / "request_prompt.txt").write_text(_job_prompt(job) + "\n", encoding="utf-8")
-    write_json(job_dir / "job_manifest.json", job)
+    _write_json_replace(job_dir / "job_manifest.json", job)
     attempts_path = job_dir / "attempts.jsonl"
-    attempts_path.write_text("", encoding="utf-8")
+    _prune_invalid_jsonl(attempts_path)
     if execution_mode == "live":
         if provider is None:
             raise ValueError("Live transcription requires a Gemini provider")
         before = len(provider.evidence)
         try:
             draft = provider.transcribe(job_dir / "slice.pdf", _job_prompt(job), job)
-        finally:
+        except Exception as exc:
             attempts = [
                 evidence
                 for evidence in provider.evidence[before:]
                 if evidence.job_id == job.job_id
             ]
-            attempts_path.write_text(
-                "".join(evidence.model_dump_json() + "\n" for evidence in attempts),
-                encoding="utf-8",
+            _append_jsonl(attempts_path, attempts)
+            evidence = attempts[-1] if attempts else None
+            status = (
+                "deferred_transient"
+                if _is_transient_evidence(evidence)
+                else "failed_nonretryable"
             )
+            raw_responses = getattr(provider, "raw_responses", {})
+            if job.job_id in raw_responses:
+                write_json(raw_path, raw_responses[job.job_id])
+            _write_last_error(
+                job_dir,
+                job=job,
+                status=status,
+                evidence=evidence,
+                exc=exc,
+            )
+            raise TranscriptionJobFailure(
+                job=job,
+                status=status,
+                evidence=evidence,
+                cause=exc,
+            ) from exc
+        attempts = [
+            evidence for evidence in provider.evidence[before:] if evidence.job_id == job.job_id
+        ]
+        _append_jsonl(attempts_path, attempts)
+        draft = canonicalize_source_content_pages(draft, job=job)
         raw_responses = getattr(provider, "raw_responses", {})
         raw_payload = raw_responses.get(job.job_id, draft.model_dump(mode="json"))
     elif execution_mode == "mock_test":
         if draft_factory is None:
             raise ValueError("mock_test requires an explicit draft factory")
-        draft = draft_factory(job)
+        draft = canonicalize_source_content_pages(draft_factory(job), job=job)
         raw_payload = draft.model_dump(mode="json")
     else:
         raise ValueError("dry_run must not write transcription job responses")
@@ -626,7 +979,149 @@ def _write_job_artifacts(
     content = inject_source_content_metadata(draft, source_id=source_id, job=job)
     write_json(validated_path, content)
     write_json(checkpoint_path, {"status": "completed", "job_id": job.job_id})
+    if last_error_path.exists():
+        last_error_path.unlink()
     return content
+
+
+def _run_transcription_job_queue(
+    *,
+    run_dir: Path,
+    pdf_path: Path,
+    source_id: str,
+    jobs: list[TranscriptionJob],
+    execution_mode: ExecutionMode,
+    draft_factory: Callable[[TranscriptionJob], SourceContentDraft] | None,
+    provider: GeminiTranscriptionProvider | None,
+    model_config: dict[str, Any],
+) -> tuple[list[SourceContent], list[TranscriptionJob]]:
+    contents_by_job: dict[str, SourceContent] = {}
+    effective_jobs: dict[str, TranscriptionJob] = {job.job_id: job for job in jobs}
+    pending = list(jobs)
+    deferred: list[TranscriptionJob] = []
+    final_failures: list[DeferredJobFailure] = []
+    max_defer_cycles = int(model_config.get("max_defer_cycles", 0))
+    cooldown_after = int(
+        model_config.get(
+            "global_cooldown_after_consecutive_capacity_errors",
+            model_config.get("global_cooldown_after_consecutive_transient_failures", 3),
+        )
+    )
+    cooldown_seconds = float(model_config.get("global_cooldown_seconds", 0))
+    consecutive_capacity = 0
+    cycle = 0
+    sleep = getattr(provider, "_sleep", time.sleep) if provider is not None else time.sleep
+
+    while pending:
+        next_deferred: list[TranscriptionJob] = []
+        for job in pending:
+            try:
+                content = _write_job_artifacts(
+                    run_dir=run_dir,
+                    pdf_path=pdf_path,
+                    source_id=source_id,
+                    job=job,
+                    execution_mode=execution_mode,
+                    draft_factory=draft_factory,
+                    provider=provider,
+                )
+                contents_by_job[content.job_id] = content
+                effective_jobs[job.job_id] = job
+                consecutive_capacity = 0
+            except TranscriptionJobFailure as exc:
+                evidence = exc.evidence
+                if not _is_transient_evidence(evidence):
+                    final_failures.append(
+                        DeferredJobFailure(job=job, status=exc.status, evidence=evidence, error=exc)
+                    )
+                    continue
+                if (
+                    evidence is not None
+                    and evidence.final_failure_category == "provider_capacity_unavailable"
+                ):
+                    consecutive_capacity += 1
+                    if cooldown_after > 0 and consecutive_capacity >= cooldown_after:
+                        _sleep_with_progress(
+                            seconds=cooldown_seconds,
+                            sleep=sleep,
+                            message=(
+                                "[Gemini] "
+                                f"{consecutive_capacity} consecutive capacity failures. "
+                                f"Global cooldown {round(cooldown_seconds)} seconds."
+                            ),
+                        )
+                        consecutive_capacity = 0
+                else:
+                    consecutive_capacity = 0
+
+                if len(job.primary_pages) > 1 and "-repair-" not in job.job_id:
+                    split_jobs = split_incomplete_job(job)
+                    effective_jobs.pop(job.job_id, None)
+                    effective_jobs.update({split.job_id: split for split in split_jobs})
+                    next_deferred.extend(split_jobs)
+                elif _can_retry_at_medium(job):
+                    medium_job = _medium_retry_job(job)
+                    effective_jobs.pop(job.job_id, None)
+                    effective_jobs[medium_job.job_id] = medium_job
+                    next_deferred.append(medium_job)
+                else:
+                    next_deferred.append(job)
+            except Exception:
+                raise
+        if final_failures:
+            details = ", ".join(
+                f"{failure.job.job_id}:{failure.status}" for failure in final_failures
+            )
+            raise RuntimeError(f"Nonretryable transcription job failure(s): {details}")
+        deferred = next_deferred
+        if not deferred:
+            break
+        cycle += 1
+        if cycle > max_defer_cycles:
+            for job in deferred:
+                job_dir = run_dir / "transcription_jobs" / job.job_id
+                evidence = None
+                attempts = [
+                    item for item in _read_job_attempts(run_dir) if item.job_id == job.job_id
+                ]
+                if attempts:
+                    evidence = attempts[-1]
+                _write_json_replace(
+                    job_dir / "checkpoint.json",
+                    {"status": "failed_transient_exhausted", "job_id": job.job_id},
+                )
+                if not (job_dir / "last_error.json").is_file():
+                    write_json(
+                        job_dir / "last_error.json",
+                        {
+                            "status": "failed_transient_exhausted",
+                            "job_id": job.job_id,
+                            "primary_pages": job.primary_pages,
+                            "http_status": evidence.http_status if evidence else None,
+                            "api_status": evidence.api_status if evidence else None,
+                            "final_failure_category": (
+                                evidence.final_failure_category if evidence else None
+                            ),
+                        },
+                    )
+            unresolved = ", ".join(job.job_id for job in deferred)
+            raise RuntimeError(
+                "Transient Gemini transcription failures exhausted after "
+                f"{max_defer_cycles} defer cycle(s): {unresolved}"
+            )
+        _sleep_with_progress(
+            seconds=cooldown_seconds,
+            sleep=sleep,
+            message=(
+                f"[Gemini] Revisiting {len(deferred)} deferred transcription job(s) "
+                f"after cooldown cycle {cycle}/{max_defer_cycles}."
+            ),
+        )
+        pending = deferred
+
+    return _sort_contents_by_page(contents_by_job), sorted(
+        effective_jobs.values(), key=lambda job: (min(job.primary_pages), job.job_id)
+    )
 
 
 def _page_metrics(
@@ -734,13 +1229,13 @@ def write_merged_transcript_outputs(
                     "uncertainty": block.uncertainty,
                 }
             )
-    write_jsonl(run_dir / "page_transcript.jsonl", page_rows)
+    _write_jsonl_replace(run_dir / "page_transcript.jsonl", page_rows)
     metrics = _page_metrics(
         page_rows=page_rows,
         page_preflight=page_preflight,
         provider_evidence=provider_evidence,
     )
-    write_json(
+    _write_json_replace(
         run_dir / "canonical_transcript.json",
         {
             "schema_version": CANONICAL_TRANSCRIPTION_SCHEMA_VERSION,
@@ -755,10 +1250,10 @@ def write_merged_transcript_outputs(
     (run_dir / "canonical_transcript.md").write_text(markdown + "\n", encoding="utf-8")
     table_rows = [row for row in page_rows if row["block_type"] == "table"]
     algorithm_rows = [row for row in page_rows if row["block_type"] == "diagram_text"]
-    write_jsonl(run_dir / "table_transcripts.jsonl", table_rows)
-    write_jsonl(run_dir / "algorithm_transcripts.jsonl", algorithm_rows)
-    write_jsonl(run_dir / "transcription_uncertainties.jsonl", findings)
-    write_json(
+    _write_jsonl_replace(run_dir / "table_transcripts.jsonl", table_rows)
+    _write_jsonl_replace(run_dir / "algorithm_transcripts.jsonl", algorithm_rows)
+    _write_jsonl_replace(run_dir / "transcription_uncertainties.jsonl", findings)
+    _write_json_replace(
         run_dir / "transcription_coverage_report.json",
         {
             "status": status,
@@ -769,7 +1264,7 @@ def write_merged_transcript_outputs(
             **metrics,
         },
     )
-    write_json(
+    _write_json_replace(
         run_dir / "transcription_manifest.json",
         {
             "schema_version": CANONICAL_TRANSCRIPTION_SCHEMA_VERSION,
@@ -860,14 +1355,23 @@ def run_transcription_v3(
         pages = [page for page in pages if start_page <= page.page_number <= end_page]
         limit = limit or len(pages)
     provider_evidence: list[ProviderCallEvidence] = []
+    scout_path = run_dir / "extraction_scout.json"
     if execution_mode == "live":
         if api_key is None and provider is None:
             raise ValueError("Live transcription requires GEMINI_API_KEY")
         if provider is None:
             provider = GeminiTranscriptionProvider(api_key=api_key, model_config=model_config)
-        scout_prompt = (root / SCOUT_PROMPT_PATH).read_text(encoding="utf-8")
-        scout_draft = provider.scout(registration.resolved_local_path, scout_prompt)
-        provider_evidence.extend(provider.evidence)
+        if scout_path.is_file():
+            scout = ExtractionScout.model_validate_json(scout_path.read_text(encoding="utf-8"))
+            scout_draft = ExtractionScoutDraft(
+                declared_page_count=scout.declared_page_count,
+                regions=scout.regions,
+                warnings=scout.warnings,
+            )
+        else:
+            scout_prompt = (root / SCOUT_PROMPT_PATH).read_text(encoding="utf-8")
+            scout_draft = provider.scout(registration.resolved_local_path, scout_prompt)
+            provider_evidence.extend(provider.evidence)
     elif execution_mode == "mock_test":
         if draft_factory is None:
             draft_factory = _mock_source_content
@@ -885,7 +1389,6 @@ def run_transcription_v3(
     else:
         raise ValueError("Unsupported execution_mode")
     scout = inject_scout_metadata(scout_draft, source_id=source_id)
-    scout_path = run_dir / "extraction_scout.json"
     if scout_path.is_file():
         scout = ExtractionScout.model_validate_json(scout_path.read_text(encoding="utf-8"))
     else:
@@ -916,27 +1419,77 @@ def run_transcription_v3(
             },
         )
         return "dry_run", run_dir
-    contents = [
-        _write_job_artifacts(
-            run_dir=run_dir,
-            pdf_path=registration.resolved_local_path,
-            source_id=source_id,
-            job=job,
-            execution_mode=execution_mode,
-            draft_factory=draft_factory,
-            provider=provider,
-        )
-        for job in jobs
-    ]
+    contents, effective_jobs = _run_transcription_job_queue(
+        run_dir=run_dir,
+        pdf_path=registration.resolved_local_path,
+        source_id=source_id,
+        jobs=jobs,
+        execution_mode=execution_mode,
+        draft_factory=draft_factory,
+        provider=provider,
+        model_config=model_config,
+    )
     if provider is not None:
-        provider_evidence = provider.evidence
+        scout_evidence = [item for item in provider.evidence if item.stage == "scout"]
+        provider_evidence = [*scout_evidence, *_read_job_attempts(run_dir)]
+    if execution_mode == "live":
+        profile_by_page = {
+            page: job.profile for job in effective_jobs for page in job.primary_pages
+        }
+        max_repair_cycles = int(model_config.get("max_targeted_repair_cycles", 2))
+        for cycle in range(1, max_repair_cycles + 1):
+            findings = validate_transcription_completeness(
+                jobs=effective_jobs,
+                contents=contents,
+                page_preflight=pages,
+                execution_mode=execution_mode,
+                provider_evidence=provider_evidence,
+            )
+            repair_pages = sorted(_repair_pages_from_findings(findings))
+            if not repair_pages:
+                break
+            repair_jobs = [
+                _one_page_repair_job(
+                    source_id=source_id,
+                    page=page,
+                    page_count=preflight.page_count,
+                    profile=profile_by_page.get(page, "dense_prose_verbatim"),
+                    cycle=cycle,
+                )
+                for page in repair_pages
+            ]
+            print(
+                f"[Gemini] Targeted completeness repair cycle {cycle}/{max_repair_cycles}: "
+                f"pages {repair_pages}",
+                flush=True,
+            )
+            repair_contents, repair_effective_jobs = _run_transcription_job_queue(
+                run_dir=run_dir,
+                pdf_path=registration.resolved_local_path,
+                source_id=source_id,
+                jobs=repair_jobs,
+                execution_mode=execution_mode,
+                draft_factory=draft_factory,
+                provider=provider,
+                model_config=model_config,
+            )
+            existing_by_job = {content.job_id: content for content in contents}
+            existing_by_job.update({content.job_id: content for content in repair_contents})
+            contents = _sort_contents_by_page(existing_by_job)
+            effective_by_job = {job.job_id: job for job in effective_jobs}
+            effective_by_job.update({job.job_id: job for job in repair_effective_jobs})
+            effective_jobs = sorted(
+                effective_by_job.values(), key=lambda job: (min(job.primary_pages), job.job_id)
+            )
+            provider_evidence = [*scout_evidence, *_read_job_attempts(run_dir)]
     manifest_path = run_dir / "transcription_manifest.json"
     if resume_run is not None and manifest_path.is_file():
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         status = str(manifest.get("status") or "completed")
-        return status, run_dir
+        if status in {"completed", "completed_with_review", "technical_limited"}:
+            return status, run_dir
     commit, branch, dirty = git_metadata(root)
-    write_json(
+    _write_json_replace(
         run_dir / "checkpoint.json",
         {
             "status": "jobs_completed",
@@ -959,7 +1512,7 @@ def run_transcription_v3(
         preflight=preflight,
         page_preflight=pages,
         scout=scout,
-        jobs=jobs,
+        jobs=effective_jobs,
         contents=contents,
         execution_mode=execution_mode,
         provider_evidence=provider_evidence,

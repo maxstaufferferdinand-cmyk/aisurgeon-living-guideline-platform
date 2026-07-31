@@ -8,6 +8,8 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 from pypdf import PdfWriter
 
+from aisurgeon.extraction.transcription_v3.pipeline import gemini_request_schema
+
 ProviderName = Literal["gemini", "openai", "ncbi"]
 CheckStatus = Literal["passed", "failed", "skipped"]
 PreflightMode = Literal["live", "dry_run", "mock_test"]
@@ -55,6 +57,18 @@ NCBI_CHECKS = (
 )
 
 
+def _safe_exception_message(exc: Exception) -> str:
+    status = getattr(exc, "status_code", None) or getattr(exc, "status", None)
+    pieces = [type(exc).__name__]
+    if isinstance(status, int):
+        pieces.append(f"HTTP {status}")
+    message = str(exc).replace("\n", " ")
+    if message:
+        pieces.append(message[:300])
+    pieces.append("No secret value inspected or logged.")
+    return "; ".join(pieces)
+
+
 class RealProviderPreflightChecker:
     """Minimal live provider checks; no secret values are returned or logged."""
 
@@ -100,7 +114,7 @@ class RealProviderPreflightChecker:
                 contents="Return JSON {'ok': true}.",
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
-                    response_schema=_Ok,
+                    response_json_schema=gemini_request_schema(_Ok),
                 ),
             )
             return True
@@ -214,6 +228,7 @@ def run_provider_preflight(
         )
     for provider in sorted(providers):
         for check in check_map[provider]:
+            safe_message = None
             if check in {"environment_variable_present", "key_present"}:
                 status: CheckStatus = "passed" if present[provider] else "failed"
             elif execution_mode != "live":
@@ -221,15 +236,20 @@ def run_provider_preflight(
             else:
                 try:
                     status = "passed" if live_checker(provider, check) else "failed"
-                except Exception:
+                except Exception as exc:
                     status = "failed"
+                    safe_message = _safe_exception_message(exc)
+                else:
+                    safe_message = None
             results.append(
                 ProviderCheckResult(
                     provider=provider,
                     check=check,
                     status=status,
                     safe_message=(
-                        None if status == "passed" else "No secret value inspected or logged."
+                        None
+                        if status == "passed"
+                        else safe_message or "No secret value inspected or logged."
                     ),
                 )
             )

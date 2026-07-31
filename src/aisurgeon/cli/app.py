@@ -676,6 +676,7 @@ def map_pubmed_evidence_command(
     env_file: EnvFileOption = None,
     resume_run: Annotated[Path | None, typer.Option("--resume-run")] = None,
     batch_size: Annotated[int, typer.Option("--batch-size", min=1)] = 10,
+    mapping_concurrency: Annotated[int, typer.Option("--mapping-concurrency", min=1)] = 1,
     limit: Annotated[int | None, typer.Option("--limit", min=1)] = None,
     retain_narrative_reviews_as_context: Annotated[
         bool, typer.Option("--retain-narrative-reviews-as-context")
@@ -696,6 +697,7 @@ def map_pubmed_evidence_command(
             api_key=settings.openai_api_key,
             resume_run=resume_run,
             batch_size=batch_size,
+            mapping_concurrency=mapping_concurrency,
             limit=limit,
             retain_narrative_reviews=retain_narrative_reviews_as_context,
         )
